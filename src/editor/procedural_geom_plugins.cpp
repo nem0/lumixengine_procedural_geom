@@ -6,13 +6,14 @@
 #include "editor/world_editor.h"
 #include "engine/allocator.h"
 #include "engine/array.h"
+#include "engine/crt.h"
 #include "engine/log.h"
 #include "engine/os.h"
 #include "engine/string.h"
 #include "engine/universe.h"
 #include "renderer/material.h"
 #include "renderer/render_scene.h"
-
+#include <math.h>
 
 #include "imgui/imgui.h"
 
@@ -31,7 +32,9 @@ enum class NodeType : u32 {
 	DISTRIBUTE_POINT_ON_FACES,
 	GRID,
 	TRANSFORM,
-	MERGE
+	MERGE,
+	SPHERE,
+	CONE
 };
 
 struct Geometry {
@@ -39,6 +42,7 @@ struct Geometry {
 		Vec3 position;
 		Vec2 uv;
 		Vec3 normal;
+		Vec3 tangent;
 	};
 
 	Geometry(IAllocator& allocator)
@@ -318,8 +322,10 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 				
 				Node* new_node = nullptr;
 				if (ImGui::MenuItem("Transform")) new_node = addNode(NodeType::TRANSFORM);
+				if (ImGui::MenuItem("Cone")) new_node = addNode(NodeType::CONE);
 				if (ImGui::MenuItem("Cube")) new_node = addNode(NodeType::CUBE);
 				if (ImGui::MenuItem("Grid")) new_node = addNode(NodeType::GRID);
+				if (ImGui::MenuItem("Sphere")) new_node = addNode(NodeType::SPHERE);
 				if (ImGui::MenuItem("Merge")) new_node = addNode(NodeType::MERGE);
 
 				if (new_node) new_node->m_pos = m_context_pos;
@@ -391,48 +397,223 @@ static Input getInput(const ProceduralGeomPlugin& editor, u16 node_id, u16 input
 	return res;
 }
 
+struct CylinderNode : Node {
+};
+
+struct ConeNode : Node {
+	NodeType getType() override { return NodeType::CONE; }
+	
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(subdivision);
+		blob.write(base_size);
+		blob.write(height);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(subdivision);
+		blob.read(base_size);
+		blob.read(height);
+	}
+	
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		result->vertices.reserve(2 * subdivision + 2);
+		result->indices.reserve(subdivision * 6);
+
+		for (u32 i = 0; i < subdivision; ++i) {
+			const float angle = i / float(subdivision) * 2 * PI;
+			Geometry::Vertex& vertex = result->vertices.emplace();
+			vertex.position = Vec3(cosf(angle), sinf(angle), 0) * base_size;
+			vertex.uv = Vec2((float)i, 0);
+			vertex.normal = normalize(vertex.position);
+			vertex.tangent = Vec3(vertex.normal.y, -vertex.normal.x, 0);
+		}
+
+		{
+			Geometry::Vertex& vertex = result->vertices.emplace();
+			vertex.position = Vec3(0, 0, height);
+			vertex.normal = Vec3(0, 0, 1);
+			vertex.tangent = Vec3(1, 0, 0);
+			vertex.uv = Vec2(0, 1);
+		}
+
+		for (u32 i = 0; i < subdivision; ++i) {
+			const float angle = i / float(subdivision) * 2 * PI;
+			Geometry::Vertex& vertex = result->vertices.emplace();
+			vertex.position = Vec3(cosf(angle), sinf(angle), 0) * base_size;
+			vertex.uv = Vec2((float)i, 0);
+			vertex.normal = Vec3(0, 0, -1);
+			vertex.tangent = Vec3(1, 0, 0);
+		}
+
+		{
+			Geometry::Vertex& vertex = result->vertices.emplace();
+			vertex.position = Vec3(0, 0, 0);
+			vertex.normal = Vec3(0, 0, -1);
+			vertex.tangent = Vec3(1, 0, 0);
+			vertex.uv = Vec2(0, 0);
+		}
+
+		for (u32 i = 0; i < subdivision; ++i) {
+			result->indices.push(i);
+			result->indices.push((i + 1) % subdivision);
+			result->indices.push(subdivision);
+		}
+
+		for (u32 i = 0; i < subdivision; ++i) {
+			result->indices.push(subdivision + 1 + i);
+			result->indices.push(subdivision + 1 + subdivision);
+			result->indices.push(subdivision + 1 + (i + 1) % subdivision);
+		}
+
+		result->type = gpu::PrimitiveType::TRIANGLES;
+		return true;
+	}
+
+	void gui() override {
+		ImGuiEx::NodeTitle("Cone");
+		outputSlot();
+		ImGui::DragInt("Subdivision", (i32*)&subdivision);
+		ImGui::DragFloat("Base size", &base_size);
+		ImGui::DragFloat("Height", &height);
+	}	
+
+	u32 subdivision = 30;
+	float base_size = 1;
+	float height = 3;
+};
+
+struct SphereNode : Node {
+	NodeType getType() override { return NodeType::SPHERE; }
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(size);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(size);
+	}
+	
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		result->vertices.reserve(6 * size * size);
+		result->indices.reserve(12 * (size - 1));
+
+		auto push_side = [result, this](u32 coord0, u32 coord1, u32 coord2, float coord2_val){
+			const u32 offset = result->vertices.size();
+			for (u32 j = 0; j < size; ++j) {
+				for (u32 i = 0; i < size; ++i) {
+					Geometry::Vertex& v = result->vertices.emplace();
+					v.position[coord0] = i / float(size - 1) * 2 - 1;
+					v.position[coord1] = j / float(size - 1) * 2 - 1;
+					v.position[coord2] = coord2_val;
+					v.position = normalize(v.position);
+					// TODO proper UV and tangent
+					v.uv = { i / float(size - 1), j / float(size - 1) };
+					v.normal = v.position;
+					v.tangent = normalize(Vec3(0, v.position.z, v.position.y));
+				}
+			}
+			for (u32 j = 0; j < size - 1; ++j) {
+				for (u32 i = 0; i < size - 1; ++i) {
+					result->indices.push(offset + i + j * size);
+					result->indices.push(offset + i + 1 + j * size);
+					result->indices.push(offset + i + (j + 1) * size);
+
+					result->indices.push(offset + i + (j + 1) * size);
+					result->indices.push(offset + i + 1 + j * size);
+					result->indices.push(offset + i + 1 + (j + 1) * size);
+				}
+			}
+		};
+
+		push_side(0, 1, 2, 1);
+		push_side(1, 0, 2, -1);
+
+		push_side(2, 0, 1, 1);
+		push_side(0, 2, 1, -1);
+		
+		push_side(1, 2, 0, 1);
+		push_side(2, 1, 0, -1);
+		result->type = gpu::PrimitiveType::TRIANGLES;
+
+		return true;
+	}
+
+	void gui() override {
+		ImGuiEx::NodeTitle("Sphere");
+		outputSlot();
+		ImGui::DragInt("Size", (i32*)&size);
+	}
+
+	u32 size = 10;
+};
+
 struct CubeNode : Node {
 	NodeType getType() override { return NodeType::CUBE; }
 
-	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Geometry::Vertex cube_verts[] = {
-			{ {-1, -1, -1},		{0, 0}, {-1, -1, -1} },
-			{ { 1, -1, -1},		{1, 0}, {1, -1, -1}	},
-			{ { 1, -1, 1},		{1, 0}, { 1, -1, 1}	},
-			{ { -1, -1, 1},		{0, 0}, {-1, -1, 1}	},
-			{ { -1, 1, -1},		{0, 1}, { -1, 1, -1} },
-			{ { 1, 1, -1},		{1, 1}, { 1, 1, -1}	},
-			{ { 1, 1, 1},		{1, 1}, { 1, 1, 1} },
-			{ { -1, 1, 1},		{0, 1}, { -1, 1, 1}	},
-		};
-		result->vertices.resize(8);
-		memcpy(result->vertices.begin(), cube_verts, sizeof(cube_verts));
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(size);
+	}
 
-		u16 cube_indices[] = {
-			0, 1, 2,
-			0, 2, 3,
-			4, 6, 5,
-			4, 7, 6,
-			0, 4, 5,
-			0, 5, 1,
-			2, 6, 7,
-			2, 7, 3,
-			0, 3, 7,
-			0, 7, 4,
-			1, 6, 2,
-			1, 5, 6
-		};		
-		result->indices.reserve(lengthOf(cube_indices));
-		for (u16 idx : cube_indices) result->indices.push(idx);
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(size);
+	}
+
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		result->vertices.reserve(2 * size.x * size.y + 2 * size.y * size.z + 2 * size.x * size.z);
+		const IVec3 s1 = size + IVec3(-1);
+		result->indices.reserve(4 * s1.x * s1.y + 4 * s1.y * s1.z + 4 * s1.x * s1.z);
+
+		auto push_side = [result](u32 size_x, u32 size_y, u32 coord0, u32 coord1, u32 coord2, float coord2_val){
+			const u32 offset = result->vertices.size();
+			for (u32 j = 0; j < size_y; ++j) {
+				for (u32 i = 0; i < size_x; ++i) {
+					Geometry::Vertex& v = result->vertices.emplace();
+					v.position[coord0] = i / float(size_x - 1) * 2 - 1;
+					v.position[coord1] = j / float(size_y - 1) * 2 - 1;
+					v.position[coord2] = coord2_val;
+					v.uv = { i / float(size_x - 1), j / float(size_y - 1) };
+					v.normal[coord0] = 0;
+					v.normal[coord1] = 0;
+					v.normal[coord2] = coord2_val;
+					v.tangent[coord0] = coord2_val;
+					v.tangent[coord1] = 0;
+					v.tangent[coord2] = 0;
+				}
+			}
+			for (u32 j = 0; j < size_y - 1; ++j) {
+				for (u32 i = 0; i < size_x - 1; ++i) {
+					result->indices.push(offset + i + j * size_x);
+					result->indices.push(offset + i + 1 + j * size_x);
+					result->indices.push(offset + i + (j + 1) * size_x);
+
+					result->indices.push(offset + i + (j + 1) * size_x);
+					result->indices.push(offset + i + 1 + j * size_x);
+					result->indices.push(offset + i + 1 + (j + 1) * size_x);
+				}
+			}
+		};
+
+		push_side(size.x, size.y, 0, 1, 2, 1);
+		push_side(size.x, size.y, 1, 0, 2, -1);
+
+		push_side(size.x, size.z, 2, 0, 1, 1);
+		push_side(size.x, size.z, 0, 2, 1, -1);
+		
+		push_side(size.y, size.z, 1, 2, 0, 1);
+		push_side(size.y, size.z, 2, 1, 0, -1);
 		result->type = gpu::PrimitiveType::TRIANGLES;
+
 		return true;
 	}
 
 	void gui() override {
 		ImGuiEx::NodeTitle("Cube");
 		outputSlot();
-		ImGui::TextUnformatted("Geometry");
+		ImGui::DragInt("Vertices X", &size.x);
+		ImGui::DragInt("Vertices Y", &size.y);
+		ImGui::DragInt("Vertices Z", &size.z);
 	}
+
+	IVec3 size = IVec3(2);	
 };
 
 struct MergeNode : Node {
@@ -497,6 +678,7 @@ struct TransformNode : Node {
 		Quat rotation;
 		rotation.fromEuler(euler);
 
+		// TODO transform normal and tangent
 		for (Geometry::Vertex& v : result->vertices) {
 			v.position = rotation.rotate(v.position) * scale + translation;
 		}
@@ -530,9 +712,10 @@ struct GridNode : Node {
 		for (i32 j = 0; j < m_rows + 1; ++j) {
 			for (i32 i = 0; i < m_cols + 1; ++i) {
 				result->vertices[i + j * (m_cols + 1)] = {
-					{ i / float(m_cols), j / float(m_rows), 0 },
+					{ i / float(m_cols) * 2 - 1, j / float(m_rows) * 2 - 1, 0 },
 					{ i / float(m_cols), j / float(m_rows) },
-					{0, 0, 1}
+					{0, 0, 1},
+					{1, 0, 0}
 				};
 			}
 		}
@@ -611,17 +794,20 @@ void ProceduralGeomPlugin::apply() {
 
 	Span<const u8> vertices((const u8*)geom.vertices.begin(), (u32)geom.vertices.byte_size());
 	Span<const u8> indices((const u8*)geom.indices.begin(), (u32)geom.indices.byte_size());
-	gpu::VertexDecl decl;
-	decl.addAttribute(0, 0, 3, gpu::AttributeType::FLOAT, 0);
-	decl.addAttribute(1, 12, 2, gpu::AttributeType::FLOAT, 0);
-	decl.addAttribute(2, 20, 3, gpu::AttributeType::FLOAT, 0);
-	scene->setProceduralGeometry(selected[0], vertices, decl, geom.type, indices, gpu::DataType::U32);
+	gpu::VertexDecl decl(geom.type);
+	decl.addAttribute(0, 0, 3, gpu::AttributeType::FLOAT, 0);  // pos
+	decl.addAttribute(1, 12, 2, gpu::AttributeType::FLOAT, 0); // uv
+	decl.addAttribute(2, 20, 3, gpu::AttributeType::FLOAT, 0); // normal
+	decl.addAttribute(3, 32, 3, gpu::AttributeType::FLOAT, 0); // tangent
+	scene->setProceduralGeometry(selected[0], vertices, decl, indices, gpu::DataType::U32);
 	scene->setProceduralGeometryMaterial(selected[0], Path(m_material));
 }
 
 Node* ProceduralGeomPlugin::addNode(NodeType type) {
 	UniquePtr<Node> node;
 	switch (type) {
+		case NodeType::CONE: node = UniquePtr<ConeNode>::create(m_allocator); break;
+		case NodeType::SPHERE: node = UniquePtr<SphereNode>::create(m_allocator); break;
 		case NodeType::CUBE: node = UniquePtr<CubeNode>::create(m_allocator); break;
 		case NodeType::OUTPUT: node = UniquePtr<OutputGeometryNode>::create(m_allocator); break;
 		case NodeType::DISTRIBUTE_POINT_ON_FACES: node = UniquePtr<DistributePointsOnFacesNode>::create(m_allocator); break;
