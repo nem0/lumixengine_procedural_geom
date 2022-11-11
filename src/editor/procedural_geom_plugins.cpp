@@ -34,7 +34,8 @@ enum class NodeType : u32 {
 	TRANSFORM,
 	MERGE,
 	SPHERE,
-	CONE
+	CONE,
+	CYLINDER
 };
 
 struct Geometry {
@@ -324,6 +325,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 				if (ImGui::MenuItem("Transform")) new_node = addNode(NodeType::TRANSFORM);
 				if (ImGui::MenuItem("Cone")) new_node = addNode(NodeType::CONE);
 				if (ImGui::MenuItem("Cube")) new_node = addNode(NodeType::CUBE);
+				if (ImGui::MenuItem("Cylinder")) new_node = addNode(NodeType::CYLINDER);
 				if (ImGui::MenuItem("Grid")) new_node = addNode(NodeType::GRID);
 				if (ImGui::MenuItem("Sphere")) new_node = addNode(NodeType::SPHERE);
 				if (ImGui::MenuItem("Merge")) new_node = addNode(NodeType::MERGE);
@@ -398,6 +400,107 @@ static Input getInput(const ProceduralGeomPlugin& editor, u16 node_id, u16 input
 }
 
 struct CylinderNode : Node {
+	NodeType getType() override { return NodeType::CYLINDER; }
+	
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(subdivision);
+		blob.write(radius);
+		blob.write(height);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(subdivision);
+		blob.read(radius);
+		blob.read(height);
+	}
+	
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		result->vertices.reserve(2 * subdivision + 4);
+
+		Geometry::Vertex& v = result->vertices.emplace();
+		v.position = Vec3(0, 0, 0.5f * height);
+		v.normal = Vec3(0, 0, 1);
+		v.tangent = Vec3(1, 0, 0);
+		v.uv = Vec2(0, 0);
+
+		Geometry::Vertex& v2 = result->vertices.emplace();
+		v2.position = Vec3(0, 0, -0.5f * height);
+		v2.normal = Vec3(0, 0, -1);
+		v2.tangent = Vec3(-1, 0, 0);
+		v2.uv = Vec2(0, 0);
+
+		for (u32 i = 0; i < subdivision; ++i) {
+			const float a = i / float(subdivision) * PI * 2;
+			Geometry::Vertex& v = result->vertices.emplace();
+			v.position = Vec3(cosf(a) * radius, sinf(a) * radius, 0.5f * height);
+			v.normal = Vec3(0, 0, 1);
+			v.tangent = Vec3(1, 0, 0);
+			v.uv = Vec2(v.position.x, v.position.y);
+		}
+
+		for (u32 i = 0; i < subdivision; ++i) {
+			const float a = i / float(subdivision) * PI * 2;
+			Geometry::Vertex& v = result->vertices.emplace();
+			v.position = Vec3(cosf(a) * radius, sinf(a) * radius, -0.5f * height);
+			v.normal = Vec3(0, 0, -1);
+			v.tangent = Vec3(-1, 0, 0);
+			v.uv = Vec2(v.position.x, v.position.y);
+		}
+
+		for (u32 i = 0; i < subdivision; ++i) {
+			const float a = i / float(subdivision) * PI * 2;
+			Geometry::Vertex& v = result->vertices.emplace();
+			v.position = Vec3(cosf(a) * radius, sinf(a) * radius, 0.5f * height);
+			v.normal = normalize(Vec3(v.position.x, v.position.y, 0));
+			v.tangent = Vec3(-1, 0, 0);
+			v.uv = Vec2(v.position.x, v.position.y);
+
+			Geometry::Vertex& v2 = result->vertices.emplace();
+			v2.position = Vec3(cosf(a) * radius, sinf(a) * radius, -0.5f * height);
+			v2.normal = normalize(Vec3(v2.position.x, v2.position.y, 0));
+			v2.tangent = Vec3(-1, 0, 0);
+			v2.uv = Vec2(v2.position.x, v2.position.y);
+		}
+
+
+		result->indices.reserve(subdivision * 3 * 2);
+		for (u32 i = 0; i < subdivision; ++i) {
+			result->indices.push(0);
+			result->indices.push(2 + i);
+			result->indices.push(2 + (i + 1) % subdivision);
+		}
+
+		for (u32 i = 0; i < subdivision; ++i) {
+			result->indices.push(1);
+			result->indices.push(2 + subdivision + (i + 1) % subdivision);
+			result->indices.push(2 + subdivision + i);
+		}
+
+		for (u32 i = 0; i < subdivision; ++i) {
+			result->indices.push(2 + 2 * subdivision + 2 * i);
+			result->indices.push(2 + 2 * subdivision + ((2 * i) + 1) % (2 * subdivision));
+			result->indices.push(2 + 2 * subdivision + ((2 * i) + 2) % (2 * subdivision));
+
+			result->indices.push(2 + 2 * subdivision + ((2 * i) + 2) % (2 * subdivision));
+			result->indices.push(2 + 2 * subdivision + ((2 * i) + 1) % (2 * subdivision));
+			result->indices.push(2 + 2 * subdivision + ((2 * i) + 3) % (2 * subdivision));
+		}
+
+		result->type = gpu::PrimitiveType::TRIANGLES;
+		return true;
+	};
+
+	void gui() override {
+		ImGuiEx::NodeTitle("Cylinder");
+		outputSlot();
+		ImGui::DragInt("Subdivision", (i32*)&subdivision);
+		ImGui::DragFloat("Radius", &radius);
+		ImGui::DragFloat("Height", &height);
+	}
+	
+	u32 subdivision = 32;
+	float radius = 1;
+	float height = 1;
 };
 
 struct ConeNode : Node {
@@ -806,6 +909,7 @@ void ProceduralGeomPlugin::apply() {
 Node* ProceduralGeomPlugin::addNode(NodeType type) {
 	UniquePtr<Node> node;
 	switch (type) {
+		case NodeType::CYLINDER: node = UniquePtr<CylinderNode>::create(m_allocator); break;
 		case NodeType::CONE: node = UniquePtr<ConeNode>::create(m_allocator); break;
 		case NodeType::SPHERE: node = UniquePtr<SphereNode>::create(m_allocator); break;
 		case NodeType::CUBE: node = UniquePtr<CubeNode>::create(m_allocator); break;
