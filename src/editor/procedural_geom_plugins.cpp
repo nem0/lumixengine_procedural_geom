@@ -6,6 +6,7 @@
 #include "editor/world_editor.h"
 #include "engine/allocator.h"
 #include "engine/array.h"
+#include "engine/core.h"
 #include "engine/crt.h"
 #include "engine/log.h"
 #include "engine/os.h"
@@ -26,6 +27,8 @@ namespace {
 
 enum { OUTPUT_FLAG = 1 << 31 };
 
+static const ComponentType SPLINE_TYPE = reflection::getComponentType("spline");
+
 enum class NodeType : u32 { 
 	OUTPUT,
 	CUBE,
@@ -35,7 +38,10 @@ enum class NodeType : u32 {
 	MERGE,
 	SPHERE,
 	CONE,
-	CYLINDER
+	CYLINDER,
+	SPLINE,
+	LINE,
+	CIRCLE
 };
 
 struct Geometry {
@@ -59,7 +65,7 @@ struct Geometry {
 };
 
 struct Node {
-	virtual void gui() = 0;
+	virtual bool gui() = 0;
 
 	virtual NodeType getType() = 0;
 
@@ -67,12 +73,13 @@ struct Node {
 	virtual void serialize(OutputMemoryStream& blob) {}
 	virtual void deserialize(InputMemoryStream& blob) {}
 
-	void nodeGUI() {
+	bool nodeGUI() {
 		ImGuiEx::BeginNode(m_id, m_pos, &m_selected);
 		m_input_counter = 0;
 		m_output_counter = 0;
-		gui();
+		bool res = gui();
 		ImGuiEx::EndNode();
+		return res;
 	}
 
 	void inputSlot() {
@@ -109,6 +116,14 @@ struct Header {
 
 static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
 
+static u16 toNodeId(int id) {
+	return u16(id);
+}
+
+static u16 toAttrIdx(int id) {
+	return u16(u32(id) >> 16);
+}
+
 struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	ProceduralGeomPlugin(StudioApp& app)
 		: m_app(app)
@@ -116,18 +131,75 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 		, m_nodes(app.getAllocator())
 		, m_links(app.getAllocator())
 		, m_recent_paths(app.getAllocator())
+		, m_undo_stack(app.getAllocator())
 	{
-		Node* n = addNode(NodeType::OUTPUT);
-		n->m_pos = ImVec2(100, 100);
+		m_delete_action.init(ICON_FA_TRASH "Delete", "Procedural geometry editor delete", "proc_geom_editor_delete", ICON_FA_TRASH, os::Keycode::DEL, Action::Modifiers::NONE, true);
+		m_delete_action.func.bind<&ProceduralGeomPlugin::deleteSelectedNodes>(this);
+		m_delete_action.plugin = this;
+
+		m_undo_action.init(ICON_FA_UNDO "Undo", "Procedural geometry editor undo", "proc_geom_editor_undo", ICON_FA_UNDO, os::Keycode::Z, Action::Modifiers::CTRL, true);
+		m_undo_action.func.bind<&ProceduralGeomPlugin::undo>(this);
+		m_undo_action.plugin = this;
+
+		m_redo_action.init(ICON_FA_REDO "Redo", "Procedural geometry editor redo", "proc_geom_editor_undo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
+		m_redo_action.func.bind<&ProceduralGeomPlugin::redo>(this);
+		m_redo_action.plugin = this;
 
 		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", true);
 		m_toggle_ui.func.bind<&ProceduralGeomPlugin::toggleOpen>(this);
 		m_toggle_ui.is_selected.bind<&ProceduralGeomPlugin::isOpen>(this);
+		
 		app.addWindowAction(&m_toggle_ui);
+		app.addAction(&m_undo_action);
+		app.addAction(&m_redo_action);
+		app.addAction(&m_delete_action);
+
+		newGraph();
 	}
 
 	~ProceduralGeomPlugin(){
 		m_app.removeAction(&m_toggle_ui);
+		m_app.removeAction(&m_undo_action);
+		m_app.removeAction(&m_redo_action);
+		m_app.removeAction(&m_delete_action);
+	}
+	
+	void deleteSelectedNodes() {
+		if (m_is_any_item_active) return;
+
+		for (i32 i = m_nodes.size() - 1; i >= 0; --i) {
+			Node* node = m_nodes[i].get();
+			if (node->m_selected) {
+				for (i32 j = m_links.size() - 1; j >= 0; --j) {
+					if (toNodeId(m_links[j].from) == node->m_id || toNodeId(m_links[j].to) == node->m_id) {
+						m_links.erase(j);
+					}
+				}
+
+				m_nodes.swapAndPop(i);
+			}
+		}
+		pushUndo(0xffFF);
+	}
+
+	void undo() {
+		if (m_undo_stack_idx <= 0) return;
+	
+		m_nodes.clear();
+		m_links.clear();
+
+		deserialize(InputMemoryStream(m_undo_stack[m_undo_stack_idx - 1].blob), "");
+		--m_undo_stack_idx;
+	}
+
+	void redo() {
+		if (m_undo_stack_idx + 1 >= m_undo_stack.size()) return;
+	
+		m_nodes.clear();
+		m_links.clear();
+
+		deserialize(InputMemoryStream(m_undo_stack[m_undo_stack_idx + 1].blob), "");
+		++m_undo_stack_idx;
 	}
 
 	bool isOpen() const { return m_is_open; }
@@ -155,6 +227,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 		deserialize(blob, path);
 
 		pushRecent(path);
+		m_path = path;
 	}
 
 	void pushRecent(const char* path) {
@@ -204,7 +277,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 		for (u32 i = 0; i < count; ++i) {
 			NodeType type;
 			blob.read(type);
-			Node* node = addNode(type);
+			Node* node = addNode(type, ImVec2(0, 0), false);
 			blob.read(node->m_id);
 			blob.read(node->m_pos);
 			node->deserialize(blob);
@@ -215,17 +288,23 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	}
 
 	void save() {
-		char path[LUMIX_MAX_PATH];
-		
-		if (!os::getSaveFilename(Span(path), "Procedural geometry\0*.pgm", "pgm")) return;
-		OutputMemoryStream blob(m_allocator);
-		serialize(blob);
-		
+		if (m_path.length() == 0) {
+			if(getSavePath() && m_path.length() != 0) saveAs(m_path.c_str());
+		}
+		else {
+			saveAs(m_path.c_str());
+		}
+	}
+
+	void saveAs(const char* path) {
 		os::OutputFile file;
 		if(!file.open(path)) {
 			logError("Could not save ", path);
 			return;
 		}
+
+		OutputMemoryStream blob(m_allocator);
+		serialize(blob);
 
 		bool success = file.write(blob.data(), blob.size());
 		file.close();
@@ -233,6 +312,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 			logError("Could not save ", path);
 		}
 
+		m_path = path;
 		pushRecent(path);
 	}
 
@@ -259,6 +339,45 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 		}
 	}
 
+	void pushUndo(u16 id) {
+		while (m_undo_stack.size() > m_undo_stack_idx + 1) m_undo_stack.pop();
+		Undo u(m_allocator);
+		u.id = id;
+		serialize(u.blob);
+		if (id == 0xffFF || m_undo_stack.back().id != id) {
+			m_undo_stack.push(static_cast<Undo&&>(u));
+			++m_undo_stack_idx;
+		}
+		else {
+			m_undo_stack.back() = static_cast<Undo&&>(u);
+		}
+	}
+
+	bool canUndo() const { return m_undo_stack_idx > 0; }
+	bool canRedo() const { return m_undo_stack_idx < m_undo_stack.size() - 1; }
+
+	void newGraph() {
+		m_links.clear();
+		m_nodes.clear();
+		m_node_id_genereator = 0;
+		m_path = "";
+	
+		addNode(NodeType::OUTPUT, ImVec2(100, 100), false);
+
+		m_undo_stack.clear();
+		m_undo_stack_idx = -1;
+		pushUndo(0xffFF);
+	}
+
+	bool getSavePath() {
+		char path[LUMIX_MAX_PATH];
+		if (os::getSaveFilename(Span(path), "Procedural geometry\0*.pgm\0", "pgm")) {
+			m_path = path;
+			return true;
+		}
+		return false;
+	}
+
 	void onWindowGUI() override {
 		m_has_focus = false;
 		if (!m_is_open) return;
@@ -268,14 +387,23 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 			m_has_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);		
 			if (ImGui::BeginMenuBar()) {
 				if (ImGui::BeginMenu("File")) {
+					if (ImGui::MenuItem("New")) newGraph();
 					if (ImGui::MenuItem("Load")) load();
 					if (ImGui::MenuItem("Save")) save();
-					if (ImGui::BeginMenu("Recet", !m_recent_paths.empty())) {
+					if (ImGui::MenuItem("Save As")) {
+						if(getSavePath() && m_path.length() != 0) saveAs(m_path.c_str());
+					}
+					if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
 						for (const String& path : m_recent_paths) {
 							if (ImGui::MenuItem(path.c_str())) load(path.c_str());
 						}
 						ImGui::EndMenu();
 					}
+					ImGui::EndMenu();
+				}
+				if (ImGui::BeginMenu("Edit")) {
+					menuItem(m_undo_action, canUndo());
+					menuItem(m_redo_action, canRedo());
 					ImGui::EndMenu();
 				}
 				if (ImGui::MenuItem("Apply", nullptr, false, !m_material.empty())) apply();
@@ -286,8 +414,22 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 
 			m_canvas.begin();
 			ImGuiEx::BeginNodeEditor("pg", &m_offset);
+
+			u32 moved_count = 0;
+			u16 moved = 0xffFF;
 			for (UniquePtr<Node>& node : m_nodes) {
-				node->nodeGUI();
+				const ImVec2 old_pos = node->m_pos;
+				if (node->nodeGUI()) {
+					pushUndo(node->m_id);
+				}
+				if (node->m_pos.x != old_pos.x || node->m_pos.y != old_pos.y) {
+					++moved_count;
+					moved = node->m_id;
+				}
+			}
+			if (moved_count > 0) {
+				if (moved_count > 1) pushUndo(0xffFE);
+				else pushUndo(moved);
 			}
 
 			i32 hovered_link = -1;
@@ -295,6 +437,16 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 				const Link& link = m_links[i];
 				ImGuiEx::NodeLink(link.from | OUTPUT_FLAG, link.to);
 				if (ImGuiEx::IsLinkHovered()) {
+					if (ImGui::IsMouseClicked(0) && ImGui::GetIO().KeyCtrl) {
+						if (ImGuiEx::IsLinkStartHovered()) {
+							ImGuiEx::StartNewLink(link.to, true);
+						}
+						else {
+							ImGuiEx::StartNewLink(link.from | OUTPUT_FLAG, false);
+						}
+						m_links.erase(i);
+						--c;
+					}
 					hovered_link = i;
 				}
 			}
@@ -303,6 +455,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 			if (ImGuiEx::GetNewLink(&newfrom, &newto)) {
 				m_links.eraseItems([&](const Link& link){ return link.to == newto; });
 				m_links.emplace(Link{newfrom, newto});
+				pushUndo(0xffFF);
 			}
 
 			ImGuiEx::EndNodeEditor();
@@ -310,6 +463,27 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 			if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
 				if (ImGui::GetIO().KeyAlt && hovered_link != -1) {
 					m_links.erase(hovered_link);
+					pushUndo(0xffFF);
+				}
+				else {
+					static const struct {
+						char key;
+						NodeType type;
+					} types[] = {
+						{ 'C', NodeType::CUBE },
+						{ 'G', NodeType::GRID },
+						{ 'L', NodeType::LINE },
+						{ 'M', NodeType::MERGE },
+						{ 'S', NodeType::SPLINE },
+						{ 'T', NodeType::TRANSFORM },
+					};
+					for (const auto& t : types) {
+						if (os::isKeyDown((os::Keycode)t.key)) {
+							const ImVec2 mp = ImGui::GetMousePos() - m_offset;
+							addNode(t.type, mp, true);
+							break;
+						}
+					}
 				}
 			}
 
@@ -322,18 +496,21 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 				static char filter[64] = "";
 				
 				Node* new_node = nullptr;
-				if (ImGui::MenuItem("Transform")) new_node = addNode(NodeType::TRANSFORM);
-				if (ImGui::MenuItem("Cone")) new_node = addNode(NodeType::CONE);
-				if (ImGui::MenuItem("Cube")) new_node = addNode(NodeType::CUBE);
-				if (ImGui::MenuItem("Cylinder")) new_node = addNode(NodeType::CYLINDER);
-				if (ImGui::MenuItem("Grid")) new_node = addNode(NodeType::GRID);
-				if (ImGui::MenuItem("Sphere")) new_node = addNode(NodeType::SPHERE);
-				if (ImGui::MenuItem("Merge")) new_node = addNode(NodeType::MERGE);
-
-				if (new_node) new_node->m_pos = m_context_pos;
+				if (ImGui::MenuItem("Circle")) new_node = addNode(NodeType::CIRCLE, m_context_pos, true);
+				if (ImGui::MenuItem("Cone")) new_node = addNode(NodeType::CONE, m_context_pos, true);
+				if (ImGui::MenuItem("Cube")) new_node = addNode(NodeType::CUBE, m_context_pos, true);
+				if (ImGui::MenuItem("Cylinder")) new_node = addNode(NodeType::CYLINDER, m_context_pos, true);
+				if (ImGui::MenuItem("Grid")) new_node = addNode(NodeType::GRID, m_context_pos, true);
+				if (ImGui::MenuItem("Line")) new_node = addNode(NodeType::LINE, m_context_pos, true);
+				if (ImGui::MenuItem("Merge")) new_node = addNode(NodeType::MERGE, m_context_pos, true);
+				if (ImGui::MenuItem("Sphere")) new_node = addNode(NodeType::SPHERE, m_context_pos, true);
+				if (ImGui::MenuItem("Spline")) new_node = addNode(NodeType::SPLINE, m_context_pos, true);
+				if (ImGui::MenuItem("Transform")) new_node = addNode(NodeType::TRANSFORM, m_context_pos, true);
 
 				ImGui::EndPopup();
 			}		
+
+			m_is_any_item_active = ImGui::IsAnyItemActive();
 
 			m_canvas.end();
 		}
@@ -341,9 +518,18 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	}
 	
 	void apply();
-	Node* addNode(NodeType type);
+	Node* addNode(NodeType type, ImVec2 pos, bool save_undo);
 
 	const char* getName() const override { return "procedural_geom"; }
+	
+	struct Undo {
+		Undo(IAllocator& allocator) : blob(allocator) {}
+		u16 id;
+		OutputMemoryStream blob;
+	};
+
+	Array<Undo> m_undo_stack;
+	i32 m_undo_stack_idx = -1;
 
 	u16 m_node_id_genereator = 1;
 	IAllocator& m_allocator;
@@ -358,15 +544,12 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	ImVec2 m_context_pos;
 	bool m_has_focus = false;
 	Action m_toggle_ui;
+	Action m_delete_action;
+	Action m_undo_action;
+	Action m_redo_action;
+	Path m_path;
+	bool m_is_any_item_active = false;
 };
-
-static u16 toNodeId(int id) {
-	return u16(id);
-}
-
-static u16 toAttrIdx(int id) {
-	return u16(u32(id) >> 16);
-}
 
 template <typename F>
 static void	forEachInput(const ProceduralGeomPlugin& editor, int node_id, const F& f) {
@@ -398,6 +581,246 @@ static Input getInput(const ProceduralGeomPlugin& editor, u16 node_id, u16 input
 	});
 	return res;
 }
+
+struct CircleNode : Node {
+	NodeType getType() override { return NodeType::CIRCLE; }
+
+	bool gui() override {
+		ImGuiEx::NodeTitle("Circle");
+		outputSlot();
+		bool res = ImGui::DragFloat("Radius", &radius);
+		ImGui::DragInt("Subdivision", (i32*)&subdivision) || res;
+		return res;
+	}
+
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		result->vertices.reserve(subdivision);
+		result->indices.reserve(subdivision + 1);
+		for (u32 i = 0; i < subdivision; ++i) {
+			const float a = i / (float)subdivision * PI * 2;
+			Geometry::Vertex& v = result->vertices.emplace();
+			v.position = Vec3(cosf(a) * radius, sinf(a) * radius, 0);
+			v.normal = normalize(v.position);
+			v.tangent = Vec3(-v.position.y, v.position.x, 0);
+			v.uv = Vec2(i / (float)subdivision, 0);
+		}
+		for (u32 i = 0; i <= subdivision; ++i) {
+			result->indices.push(i % subdivision);
+		}
+		result->type = gpu::PrimitiveType::LINES;
+		return true;
+	}
+	
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(radius);
+		blob.write(subdivision);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(radius);
+		blob.read(subdivision);
+	}
+
+	u32 subdivision = 32;
+	float radius = 1.f;
+};
+
+struct LineNode : Node {
+	NodeType getType() override { return NodeType::LINE; }
+
+	bool gui() override {
+		ImGuiEx::NodeTitle("Line");
+		outputSlot();
+		bool res = ImGui::DragFloat("Size", &size);
+		ImGui::DragInt("Subdivision", (i32*)&subdivision) || res;
+		return res;
+	}
+
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		result->vertices.reserve(subdivision + 1);
+		for (u32 i = 0; i <= subdivision; ++i) {
+			Geometry::Vertex& v = result->vertices.emplace();
+			v.position = Vec3(-size * (i / (float)subdivision * 2 - 1), 0, 0);
+			v.uv = Vec2(i / (float)subdivision, 0);
+			v.normal = Vec3(0, 1, 0);
+			v.tangent = Vec3(1, 0, 0);
+		}
+		result->type = gpu::PrimitiveType::LINES;
+		return true;
+	}
+
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(size);
+		blob.write(subdivision);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(size);
+		blob.read(subdivision);
+	}
+
+	float size = 1.f;
+	u32 subdivision = 16;
+};
+
+struct SplineNode : Node {
+	struct SplineIterator {
+		SplineIterator(Span<const Vec3> points) : points(points) {}
+
+		void move(float delta) { t += delta; }
+		bool isEnd() { return u32(t) >= points.length() - 2; }
+		Vec3 getDir() {
+			const u32 segment = u32(t);
+			float rel_t = t - segment;
+			Vec3 p0 = points[segment + 0];
+			Vec3 p1 = points[segment + 1];
+			Vec3 p2 = points[segment + 2];
+			return lerp(p1 - p0, p2 - p1, rel_t);
+		}
+
+		Vec3 getPosition() {
+			const u32 segment = u32(t);
+			float rel_t = t - segment;
+			Vec3 p0 = points[segment + 0];
+			Vec3 p1 = points[segment + 1];
+			Vec3 p2 = points[segment + 2];
+			p0 = (p1 + p0) * 0.5f;
+			p2 = (p1 + p2) * 0.5f;
+
+			return lerp(lerp(p0, p1, rel_t), lerp(p1, p2, rel_t), rel_t);
+		}
+
+		float t = 0;
+
+		Span<const Vec3> points;
+	};
+
+	NodeType getType() override { return NodeType::SPLINE; }
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Spline");
+		inputSlot();
+		ImGui::TextUnformatted("Profile");
+		ImGui::SameLine();
+		outputSlot();
+		return ImGui::DragFloat("Step", &step);
+	}
+
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		const Input profile_input = getInput(*m_plugin, m_id, 0);
+		if (!profile_input) return false;
+
+		Geometry profile(m_plugin->m_allocator);
+		if (!profile_input.getGeometry(&profile)) return false;
+		if (profile.type != gpu::PrimitiveType::LINES) return false;
+
+		WorldEditor& editor = m_plugin->m_app.getWorldEditor();
+		const Array<EntityRef>& selected = editor.getSelectedEntities();
+		if (selected.size() != 1) return false;
+
+ 		Universe& universe = *editor.getUniverse();
+		if (!universe.hasComponent(selected[0], SPLINE_TYPE)) return false;
+
+		CoreScene* core_scene = (CoreScene*)universe.getScene(SPLINE_TYPE);
+		const Spline& spline = core_scene->getSpline(selected[0]);
+		if (spline.points.empty()) return false;
+
+		SplineIterator iterator(spline.points);
+				
+		result->vertices.reserve(16 * 1024);
+
+		const Transform spline_tr = universe.getTransform(selected[0]);
+		const Transform spline_tr_inv = spline_tr.inverted();
+		/*
+		auto write_vertex = [&](const Vertex& v){
+			Vec3 position = v.position;
+			if (m_geometry_mode == GeometryMode::SNAP_ALL) {
+				const DVec3 p = spline_tr.transform(v.position) + Vec3(0, 1 + m_snap_height, 0);
+				const RayCastModelHit hit = render_scene->castRayTerrain(p, Vec3(0, -1, 0));
+				if (hit.is_hit) {
+					const DVec3 hp = hit.origin + (hit.t - m_snap_height) * hit.dir;
+					position = Vec3(spline_tr_inv.transform(hp));
+				}
+			}
+			vertices.write(position);
+			if (has_uvs) {
+				vertices.write(v.uv);
+			}
+			if (sg.num_user_channels > 0) {
+				u32 tmp = 0;
+				vertices.write(tmp);
+			}
+		};
+			*/			
+		float d = 0;
+		u32 rows = 0;
+		Vec3 prev_p = spline.points[0];
+		while (!iterator.isEnd()) {
+			++rows;
+			const Vec3 p = iterator.getPosition();
+			/*if (m_geometry_mode == GeometryMode::SNAP_CENTER) {
+				const DVec3 pglob = spline_tr.transform(p) + Vec3(0, 100 + m_snap_height, 0);
+				const RayCastModelHit hit = render_scene->castRayTerrain(pglob, Vec3(0, -1, 0));
+				if (hit.is_hit) {
+					const DVec3 hp = hit.origin + (hit.t - m_snap_height) * hit.dir;
+					p = Vec3(spline_tr_inv.transform(hp));
+				}
+			}*/
+
+			const Vec3 dir = normalize(iterator.getDir());
+			const Vec3 side = normalize(cross(dir, Vec3(0, 1, 0))) * width;
+			const Vec3 up = normalize(cross(side, dir));
+			d += length(p - prev_p);
+
+			const Vec3 p0 = p - side;
+			const u32 w = profile.vertices.size();
+
+			for (u32 i = 0; i < w; ++i) {
+				Geometry::Vertex& v = result->vertices.emplace();
+				v.position = p + side * profile.vertices[i].position.x + up * profile.vertices[i].position.y;
+				v.uv = profile.vertices[i].uv;
+				v.uv.y = d;
+				v.normal = profile.vertices[i].normal;
+				v.normal = side * v.normal.x + up * v.normal.y + dir * v.normal.z;
+				v.tangent = profile.vertices[i].tangent;
+				v.tangent = side * v.tangent.x + up * v.tangent.y + dir * v.tangent.z;
+			}
+
+			if (rows > 1) {
+				const u32 offset = result->vertices.size() - 2 * w;
+				for (u32 i = 0; i < w - 1; ++i) {
+					result->indices.push(offset + i);
+					result->indices.push(offset + i + w);
+					result->indices.push(offset + i + 1);
+
+					result->indices.push(offset + i + w + 1);
+					result->indices.push(offset + i + 1);
+					result->indices.push(offset + i + w);
+				}
+			}
+
+			iterator.move(step);
+			prev_p = p;
+		}
+
+ 		result->type = gpu::PrimitiveType::TRIANGLES;
+		return true;
+	}
+
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(width);
+		blob.write(step);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(width);
+		blob.read(step);
+	}
+
+
+	float width = 1;
+	float step = 0.1f;
+};
 
 struct CylinderNode : Node {
 	NodeType getType() override { return NodeType::CYLINDER; }
@@ -490,12 +913,13 @@ struct CylinderNode : Node {
 		return true;
 	};
 
-	void gui() override {
+	bool gui() override {
 		ImGuiEx::NodeTitle("Cylinder");
 		outputSlot();
-		ImGui::DragInt("Subdivision", (i32*)&subdivision);
-		ImGui::DragFloat("Radius", &radius);
-		ImGui::DragFloat("Height", &height);
+		bool res = ImGui::DragInt("Subdivision", (i32*)&subdivision);
+		ImGui::DragFloat("Radius", &radius) || res;
+		ImGui::DragFloat("Height", &height) || res;
+		return res;
 	}
 	
 	u32 subdivision = 32;
@@ -572,12 +996,13 @@ struct ConeNode : Node {
 		return true;
 	}
 
-	void gui() override {
+	bool gui() override {
 		ImGuiEx::NodeTitle("Cone");
 		outputSlot();
-		ImGui::DragInt("Subdivision", (i32*)&subdivision);
-		ImGui::DragFloat("Base size", &base_size);
-		ImGui::DragFloat("Height", &height);
+		bool res = ImGui::DragInt("Subdivision", (i32*)&subdivision);
+		ImGui::DragFloat("Base size", &base_size) || res;
+		ImGui::DragFloat("Height", &height) || res;
+		return res;
 	}	
 
 	u32 subdivision = 30;
@@ -640,10 +1065,10 @@ struct SphereNode : Node {
 		return true;
 	}
 
-	void gui() override {
+	bool gui() override {
 		ImGuiEx::NodeTitle("Sphere");
 		outputSlot();
-		ImGui::DragInt("Size", (i32*)&size);
+		return ImGui::DragInt("Size", (i32*)&size);
 	}
 
 	u32 size = 10;
@@ -708,12 +1133,13 @@ struct CubeNode : Node {
 		return true;
 	}
 
-	void gui() override {
+	bool gui() override {
 		ImGuiEx::NodeTitle("Cube");
 		outputSlot();
-		ImGui::DragInt("Vertices X", &size.x);
-		ImGui::DragInt("Vertices Y", &size.y);
-		ImGui::DragInt("Vertices Z", &size.z);
+		bool res = ImGui::DragInt("Vertices X", &size.x);
+		ImGui::DragInt("Vertices Y", &size.y) || res;
+		ImGui::DragInt("Vertices Z", &size.z) || res;
+		return res;
 	}
 
 	IVec3 size = IVec3(2);	
@@ -747,7 +1173,7 @@ struct MergeNode : Node {
 		return true;
 	}
 
-	void gui() override {
+	bool gui() override {
 		ImGuiEx::NodeTitle("Merge");
 		ImGui::BeginGroup();
 		inputSlot(); ImGui::TextUnformatted("A");
@@ -755,6 +1181,7 @@ struct MergeNode : Node {
 		ImGui::EndGroup();
 		ImGui::SameLine();		
 		outputSlot();
+		return false;
 	}
 };
 
@@ -789,16 +1216,17 @@ struct TransformNode : Node {
 		return true;
 	}
 
-	void gui() override {
+	bool gui() override {
 		ImGuiEx::NodeTitle("Transform");
 		inputSlot();
 		ImGui::BeginGroup();
-		ImGui::DragFloat3("Translation", &translation.x);
-		ImGuiEx::InputRotation("Rotation", &euler.x);
-		ImGui::DragFloat3("Scale", &scale.x);
+		bool res = ImGui::DragFloat3("Translation", &translation.x);
+		ImGuiEx::InputRotation("Rotation", &euler.x) || res;
+		ImGui::DragFloat3("Scale", &scale.x) || res;
 		ImGui::EndGroup();
 		ImGui::SameLine();
 		outputSlot();
+		return res;
 	}
 
 	Vec3 translation = Vec3::ZERO;
@@ -839,11 +1267,12 @@ struct GridNode : Node {
 		return true;
 	}
 
-	void gui() override {
+	bool gui() override {
 		ImGuiEx::NodeTitle("Grid");
 		outputSlot();
-		ImGui::DragInt("Columns", &m_cols);
-		ImGui::DragInt("Rows", &m_rows);
+		bool res = ImGui::DragInt("Columns", &m_cols);
+		ImGui::DragInt("Rows", &m_rows) || res;
+		return res;
 	}
 
 	i32 m_cols = 10;
@@ -858,12 +1287,13 @@ struct DistributePointsOnFacesNode : Node {
 		return false;
 	}
 
-	void gui() override {
+	bool gui() override {
 		ImGuiEx::NodeTitle("Distribute points on faces");
 		inputSlot();
 		ImGui::TextUnformatted(" ");
 		ImGui::SameLine();
 		outputSlot();
+		return false;
 	}
 };
 
@@ -876,10 +1306,11 @@ struct OutputGeometryNode : Node {
 		return false;
 	}
 
-	void gui() override {
+	bool gui() override {
 		ImGuiEx::NodeTitle("Output");
 		inputSlot();
 		ImGui::NewLine();
+		return false;
 	}
 };
 
@@ -906,9 +1337,12 @@ void ProceduralGeomPlugin::apply() {
 	scene->setProceduralGeometryMaterial(selected[0], Path(m_material));
 }
 
-Node* ProceduralGeomPlugin::addNode(NodeType type) {
+Node* ProceduralGeomPlugin::addNode(NodeType type, ImVec2 pos, bool save_undo) {
 	UniquePtr<Node> node;
 	switch (type) {
+		case NodeType::CIRCLE: node = UniquePtr<CircleNode>::create(m_allocator); break;
+		case NodeType::LINE: node = UniquePtr<LineNode>::create(m_allocator); break;
+		case NodeType::SPLINE: node = UniquePtr<SplineNode>::create(m_allocator); break;
 		case NodeType::CYLINDER: node = UniquePtr<CylinderNode>::create(m_allocator); break;
 		case NodeType::CONE: node = UniquePtr<ConeNode>::create(m_allocator); break;
 		case NodeType::SPHERE: node = UniquePtr<SphereNode>::create(m_allocator); break;
@@ -921,10 +1355,12 @@ Node* ProceduralGeomPlugin::addNode(NodeType type) {
 		default: ASSERT(false); return nullptr;
 	}
 	Node* res = node.get();
+	res->m_pos = pos;
 	res->m_plugin = this;
 	res->m_allocator = &m_allocator;
 	res->m_id = ++m_node_id_genereator;
 	m_nodes.push(node.move());
+	if (save_undo) pushUndo(0xffFF);
 	return res;
 }
 
