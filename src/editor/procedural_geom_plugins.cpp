@@ -92,7 +92,7 @@ struct Node {
 		++m_output_counter;
 	}
 
-	ProceduralGeomPlugin* m_plugin;
+	struct EditorResource* m_resource;
 	IAllocator* m_allocator;
 	u16 m_id;
 	bool m_selected = false;
@@ -112,10 +112,6 @@ struct Header {
 	u32 version = 0;
 };
 
-} // anonymous namespace
-
-static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
-
 static u16 toNodeId(int id) {
 	return u16(id);
 }
@@ -124,12 +120,89 @@ static u16 toAttrIdx(int id) {
 	return u16(u32(id) >> 16);
 }
 
+struct EditorResource {
+	EditorResource(StudioApp& app, IAllocator& allocator)
+		: m_app(app)
+		, m_allocator(allocator)
+		, m_nodes(allocator)
+		, m_links(allocator)
+	{}
+
+	void deleteSelectedNodes() {
+		for (i32 i = m_nodes.size() - 1; i >= 0; --i) {
+			Node* node = m_nodes[i].get();
+			if (node->m_selected) {
+				for (i32 j = m_links.size() - 1; j >= 0; --j) {
+					if (toNodeId(m_links[j].from) == node->m_id || toNodeId(m_links[j].to) == node->m_id) {
+						m_links.erase(j);
+					}
+				}
+
+				m_nodes.swapAndPop(i);
+			}
+		}
+	}
+
+	void serialize(OutputMemoryStream& blob) {
+		Header header;
+		blob.write(header);
+		blob.writeString(m_material.c_str());
+		blob.write(m_nodes.size());
+		for (UniquePtr<Node>& node : m_nodes) {
+			blob.write(node->getType());
+			blob.write(node->m_id);
+			blob.write(node->m_pos);
+			node->serialize(blob);
+		}
+		blob.write(m_links.size());
+		blob.write(m_links.begin(), m_links.byte_size());
+	}
+
+	void deserialize(InputMemoryStream& blob, const char* path) {
+		ASSERT(m_links.empty());
+		ASSERT(m_nodes.empty());
+
+		Header header;
+		blob.read(header);
+		m_material = blob.readString();
+		if (header.magic != Header::MAGIC) {
+			logError("Corrupted file ", path);
+			return;
+		}
+		u32 count;
+		blob.read(count);
+		m_nodes.reserve(count);
+		for (u32 i = 0; i < count; ++i) {
+			NodeType type;
+			blob.read(type);
+			Node* node = createNode(type, ImVec2(0, 0));
+			blob.read(node->m_id);
+			blob.read(node->m_pos);
+			node->deserialize(blob);
+		}
+		blob.read(count);
+		m_links.resize(count);
+		blob.read(m_links.begin(), m_links.byte_size());
+	}
+
+	Node* createNode(NodeType type, ImVec2 pos);
+
+	IAllocator& m_allocator;
+	StudioApp& m_app;
+	Array<UniquePtr<Node>> m_nodes;
+	Array<Link> m_links;
+	Path m_material;
+	u16 m_node_id_genereator = 1;
+};
+
+} // anonymous namespace
+
+static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
+
 struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	ProceduralGeomPlugin(StudioApp& app)
 		: m_app(app)
 		, m_allocator(app.getAllocator())
-		, m_nodes(app.getAllocator())
-		, m_links(app.getAllocator())
 		, m_recent_paths(app.getAllocator())
 		, m_undo_stack(app.getAllocator())
 	{
@@ -141,7 +214,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 		m_undo_action.func.bind<&ProceduralGeomPlugin::undo>(this);
 		m_undo_action.plugin = this;
 
-		m_redo_action.init(ICON_FA_REDO "Redo", "Procedural geometry editor redo", "proc_geom_editor_undo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
+		m_redo_action.init(ICON_FA_REDO "Redo", "Procedural geometry editor redo", "proc_geom_editor_redo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
 		m_redo_action.func.bind<&ProceduralGeomPlugin::redo>(this);
 		m_redo_action.plugin = this;
 
@@ -166,39 +239,27 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	
 	void deleteSelectedNodes() {
 		if (m_is_any_item_active) return;
-
-		for (i32 i = m_nodes.size() - 1; i >= 0; --i) {
-			Node* node = m_nodes[i].get();
-			if (node->m_selected) {
-				for (i32 j = m_links.size() - 1; j >= 0; --j) {
-					if (toNodeId(m_links[j].from) == node->m_id || toNodeId(m_links[j].to) == node->m_id) {
-						m_links.erase(j);
-					}
-				}
-
-				m_nodes.swapAndPop(i);
-			}
-		}
+		m_resource->deleteSelectedNodes();
 		pushUndo(0xffFF);
 	}
 
 	void undo() {
 		if (m_undo_stack_idx <= 0) return;
 	
-		m_nodes.clear();
-		m_links.clear();
+		LUMIX_DELETE(m_allocator, m_resource);
+		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
 
-		deserialize(InputMemoryStream(m_undo_stack[m_undo_stack_idx - 1].blob), "");
+		m_resource->deserialize(InputMemoryStream(m_undo_stack[m_undo_stack_idx - 1].blob), "");
 		--m_undo_stack_idx;
 	}
 
 	void redo() {
 		if (m_undo_stack_idx + 1 >= m_undo_stack.size()) return;
 	
-		m_nodes.clear();
-		m_links.clear();
+		LUMIX_DELETE(m_allocator, m_resource);
+		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
 
-		deserialize(InputMemoryStream(m_undo_stack[m_undo_stack_idx + 1].blob), "");
+		m_resource->deserialize(InputMemoryStream(m_undo_stack[m_undo_stack_idx + 1].blob), "");
 		++m_undo_stack_idx;
 	}
 
@@ -223,8 +284,10 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 		}
 		file.close();
 
+		clear();
+
 		InputMemoryStream blob(data);
-		deserialize(blob, path);
+		m_resource->deserialize(blob, path);
 
 		pushRecent(path);
 		m_path = path;
@@ -241,51 +304,12 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	}
 
 	void clear() {
-		m_nodes.clear();
-		m_node_id_genereator = 1;
-		m_links.clear();
-	}
-	
-	void serialize(OutputMemoryStream& blob) {
-		Header header;
-		blob.write(header);
-		blob.writeString(m_material);
-		blob.write(m_nodes.size());
-		for (UniquePtr<Node>& node : m_nodes) {
-			blob.write(node->getType());
-			blob.write(node->m_id);
-			blob.write(node->m_pos);
-			node->serialize(blob);
-		}
-		blob.write(m_links.size());
-		blob.write(m_links.begin(), m_links.byte_size());
+		LUMIX_DELETE(m_allocator, m_resource);
+		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
+		m_undo_stack.clear();
+		m_undo_stack_idx = -1;
 	}
 
-	void deserialize(InputMemoryStream& blob, const char* path) {
-		clear();
-
-		Header header;
-		blob.read(header);
-		m_material = blob.readString();
-		if (header.magic != Header::MAGIC) {
-			logError("Corrupted file ", path);
-			return;
-		}
-		u32 count;
-		blob.read(count);
-		m_nodes.reserve(count);
-		for (u32 i = 0; i < count; ++i) {
-			NodeType type;
-			blob.read(type);
-			Node* node = addNode(type, ImVec2(0, 0), false);
-			blob.read(node->m_id);
-			blob.read(node->m_pos);
-			node->deserialize(blob);
-		}
-		blob.read(count);
-		m_links.resize(count);
-		blob.read(m_links.begin(), m_links.byte_size());
-	}
 
 	void save() {
 		if (m_path.length() == 0) {
@@ -304,7 +328,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 		}
 
 		OutputMemoryStream blob(m_allocator);
-		serialize(blob);
+		m_resource->serialize(blob);
 
 		bool success = file.write(blob.data(), blob.size());
 		file.close();
@@ -343,7 +367,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 		while (m_undo_stack.size() > m_undo_stack_idx + 1) m_undo_stack.pop();
 		Undo u(m_allocator);
 		u.id = id;
-		serialize(u.blob);
+		m_resource->serialize(u.blob);
 		if (id == 0xffFF || m_undo_stack.back().id != id) {
 			m_undo_stack.push(static_cast<Undo&&>(u));
 			++m_undo_stack_idx;
@@ -357,15 +381,11 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	bool canRedo() const { return m_undo_stack_idx < m_undo_stack.size() - 1; }
 
 	void newGraph() {
-		m_links.clear();
-		m_nodes.clear();
-		m_node_id_genereator = 0;
+		clear();
 		m_path = "";
 	
 		addNode(NodeType::OUTPUT, ImVec2(100, 100), false);
 
-		m_undo_stack.clear();
-		m_undo_stack_idx = -1;
 		pushUndo(0xffFF);
 	}
 
@@ -406,18 +426,19 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 					menuItem(m_redo_action, canRedo());
 					ImGui::EndMenu();
 				}
-				if (ImGui::MenuItem("Apply", nullptr, false, !m_material.empty())) apply();
+				if (ImGui::MenuItem("Apply", nullptr, false, m_resource->m_material.length() != 0)) apply();
 				ImGui::EndMenuBar();
 			}
 
-			m_app.getAssetBrowser().resourceInput("material", Span(m_material.data), Material::TYPE);
+			Span span(m_resource->m_material.getMutableData(), m_resource->m_material.capacity());
+			m_app.getAssetBrowser().resourceInput("material", span, Material::TYPE);
 
 			m_canvas.begin();
 			ImGuiEx::BeginNodeEditor("pg", &m_offset);
 
 			u32 moved_count = 0;
 			u16 moved = 0xffFF;
-			for (UniquePtr<Node>& node : m_nodes) {
+			for (UniquePtr<Node>& node : m_resource->m_nodes) {
 				const ImVec2 old_pos = node->m_pos;
 				if (node->nodeGUI()) {
 					pushUndo(node->m_id);
@@ -433,8 +454,8 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 			}
 
 			i32 hovered_link = -1;
-			for (i32 i = 0, c = m_links.size(); i < c; ++i) {
-				const Link& link = m_links[i];
+			for (i32 i = 0, c = m_resource->m_links.size(); i < c; ++i) {
+				const Link& link = m_resource->m_links[i];
 				ImGuiEx::NodeLink(link.from | OUTPUT_FLAG, link.to);
 				if (ImGuiEx::IsLinkHovered()) {
 					if (ImGui::IsMouseClicked(0) && ImGui::GetIO().KeyCtrl) {
@@ -444,7 +465,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 						else {
 							ImGuiEx::StartNewLink(link.from | OUTPUT_FLAG, false);
 						}
-						m_links.erase(i);
+						m_resource->m_links.erase(i);
 						--c;
 					}
 					hovered_link = i;
@@ -453,8 +474,8 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 
 			u32 newfrom, newto;
 			if (ImGuiEx::GetNewLink(&newfrom, &newto)) {
-				m_links.eraseItems([&](const Link& link){ return link.to == newto; });
-				m_links.emplace(Link{newfrom, newto});
+				m_resource->m_links.eraseItems([&](const Link& link){ return link.to == newto; });
+				m_resource->m_links.emplace(Link{newfrom, newto});
 				pushUndo(0xffFF);
 			}
 
@@ -462,7 +483,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 
 			if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
 				if (ImGui::GetIO().KeyAlt && hovered_link != -1) {
-					m_links.erase(hovered_link);
+					m_resource->m_links.erase(hovered_link);
 					pushUndo(0xffFF);
 				}
 				else {
@@ -531,15 +552,11 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	Array<Undo> m_undo_stack;
 	i32 m_undo_stack_idx = -1;
 
-	u16 m_node_id_genereator = 1;
 	IAllocator& m_allocator;
-	Array<UniquePtr<Node>> m_nodes;
-	Array<Link> m_links;
 	StudioApp& m_app;
 	ImVec2 m_offset = ImVec2(0, 0);
 	ImGuiEx::Canvas m_canvas;
 	bool m_is_open = true;
-	StaticString<LUMIX_MAX_PATH> m_material;
 	Array<String> m_recent_paths;
 	ImVec2 m_context_pos;
 	bool m_has_focus = false;
@@ -549,17 +566,18 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	Action m_redo_action;
 	Path m_path;
 	bool m_is_any_item_active = false;
+	EditorResource* m_resource = nullptr;
 };
 
 template <typename F>
-static void	forEachInput(const ProceduralGeomPlugin& editor, int node_id, const F& f) {
-	for (const Link& link : editor.m_links) {
+static void	forEachInput(const EditorResource& resource, int node_id, const F& f) {
+	for (const Link& link : resource.m_links) {
 		if (toNodeId(link.to) == node_id) {
-			const int iter = editor.m_nodes.find([&](const UniquePtr<Node>& node) { return node->m_id == toNodeId(link.from); }); 
-			Node* from = editor.m_nodes[iter].get();
+			const int iter = resource.m_nodes.find([&](const UniquePtr<Node>& node) { return node->m_id == toNodeId(link.from); }); 
+			Node* from = resource.m_nodes[iter].get();
 			const u16 from_attr = toAttrIdx(link.from);
 			const u16 to_attr = toAttrIdx(link.to);
-			f(from, from_attr, to_attr, u32(&link - editor.m_links.begin()));
+			f(from, from_attr, to_attr, u32(&link - resource.m_links.begin()));
 		}
 	}
 }
@@ -571,9 +589,9 @@ struct Input {
 	operator bool() const { return node != nullptr; }
 };
 
-static Input getInput(const ProceduralGeomPlugin& editor, u16 node_id, u16 input_idx) {
+static Input getInput(const EditorResource& resource, u16 node_id, u16 input_idx) {
 	Input res;
-	forEachInput(editor, node_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
+	forEachInput(resource, node_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
 		if (to_attr == input_idx) {
 			res.output_idx = from_attr;
 			res.node = from;
@@ -707,14 +725,14 @@ struct SplineNode : Node {
 	}
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input profile_input = getInput(*m_plugin, m_id, 0);
+		const Input profile_input = getInput(*m_resource, m_id, 0);
 		if (!profile_input) return false;
 
-		Geometry profile(m_plugin->m_allocator);
+		Geometry profile(m_resource->m_allocator);
 		if (!profile_input.getGeometry(&profile)) return false;
 		if (profile.type != gpu::PrimitiveType::LINES) return false;
 
-		WorldEditor& editor = m_plugin->m_app.getWorldEditor();
+		WorldEditor& editor = m_resource->m_app.getWorldEditor();
 		const Array<EntityRef>& selected = editor.getSelectedEntities();
 		if (selected.size() != 1) return false;
 
@@ -1149,11 +1167,11 @@ struct MergeNode : Node {
 	NodeType getType() override { return NodeType::MERGE; }
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input input0 = getInput(*m_plugin, m_id, 0);
+		const Input input0 = getInput(*m_resource, m_id, 0);
 		if (!input0) return false;
 		if (!input0.getGeometry(result)) return false;
 
-		const Input input1 = getInput(*m_plugin, m_id, 1);
+		const Input input1 = getInput(*m_resource, m_id, 1);
 		if (input1) {
 			Geometry tmp(*m_allocator);
 			if (!input1.getGeometry(&tmp)) return false;
@@ -1201,7 +1219,7 @@ struct TransformNode : Node {
 	}
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input input = getInput(*m_plugin, m_id, 0);
+		const Input input = getInput(*m_resource, m_id, 0);
 		if (!input) return false;
 		if (!input.getGeometry(result)) return false;
 
@@ -1301,7 +1319,7 @@ struct OutputGeometryNode : Node {
 	NodeType getType() override { return NodeType::OUTPUT; }
 	
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input input = getInput(*m_plugin, m_id, 0);
+		const Input input = getInput(*m_resource, m_id, 0);
 		if (input) return input.getGeometry(result);
 		return false;
 	}
@@ -1315,7 +1333,7 @@ struct OutputGeometryNode : Node {
 };
 
 void ProceduralGeomPlugin::apply() {	
-	OutputGeometryNode* output = (OutputGeometryNode*)m_nodes[0].get();
+	OutputGeometryNode* output = (OutputGeometryNode*)m_resource->m_nodes[0].get();
 	Geometry geom(m_allocator);
 	if (!output->getGeometry(0, &geom)) return;
 
@@ -1334,10 +1352,10 @@ void ProceduralGeomPlugin::apply() {
 	decl.addAttribute(2, 20, 3, gpu::AttributeType::FLOAT, 0); // normal
 	decl.addAttribute(3, 32, 3, gpu::AttributeType::FLOAT, 0); // tangent
 	scene->setProceduralGeometry(selected[0], vertices, decl, indices, gpu::DataType::U32);
-	scene->setProceduralGeometryMaterial(selected[0], Path(m_material));
+	scene->setProceduralGeometryMaterial(selected[0], Path(m_resource->m_material));
 }
 
-Node* ProceduralGeomPlugin::addNode(NodeType type, ImVec2 pos, bool save_undo) {
+Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 	UniquePtr<Node> node;
 	switch (type) {
 		case NodeType::CIRCLE: node = UniquePtr<CircleNode>::create(m_allocator); break;
@@ -1354,14 +1372,19 @@ Node* ProceduralGeomPlugin::addNode(NodeType type, ImVec2 pos, bool save_undo) {
 		case NodeType::MERGE: node = UniquePtr<MergeNode>::create(m_allocator); break;
 		default: ASSERT(false); return nullptr;
 	}
-	Node* res = node.get();
-	res->m_pos = pos;
-	res->m_plugin = this;
-	res->m_allocator = &m_allocator;
-	res->m_id = ++m_node_id_genereator;
+	node->m_pos = pos;
+	node->m_resource = this;
+	node->m_allocator = &m_allocator;
+	node->m_id = ++m_node_id_genereator;
 	m_nodes.push(node.move());
+	return m_nodes.back().get();
+}
+
+Node* ProceduralGeomPlugin::addNode(NodeType type, ImVec2 pos, bool save_undo) {
+	Node* n = m_resource->createNode(type, pos);
+	n->m_pos = pos;
 	if (save_undo) pushUndo(0xffFF);
-	return res;
+	return n;
 }
 
 LUMIX_STUDIO_ENTRY(procedural_geom) {
