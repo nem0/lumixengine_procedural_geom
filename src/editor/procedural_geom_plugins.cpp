@@ -1238,12 +1238,22 @@ struct OutputGeometryNode : Node {
 		return false;
 	}
 
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(user_channels_count);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(user_channels_count);
+	}
+
 	bool gui() override {
-		ImGuiEx::NodeTitle("Output");
+		ImGuiEx::NodeTitle("Output geometry");
 		inputSlot();
-		ImGui::NewLine();
+		ImGui::DragInt("User channels", (i32*)&user_channels_count);
 		return false;
 	}
+
+	u32 user_channels_count = 0;
 };
 
 void ProceduralGeomPlugin::apply() {	
@@ -1265,6 +1275,17 @@ void ProceduralGeomPlugin::apply() {
 	decl.addAttribute(1, 12, 2, gpu::AttributeType::FLOAT, 0); // uv
 	decl.addAttribute(2, 20, 3, gpu::AttributeType::FLOAT, 0); // normal
 	decl.addAttribute(3, 32, 3, gpu::AttributeType::FLOAT, 0); // tangent
+	OutputMemoryStream user_vertices(m_allocator);
+	if (output->user_channels_count > 0) {
+		decl.addAttribute(4, 44, output->user_channels_count, gpu::AttributeType::U8, gpu::Attribute::NORMALIZED);
+		user_vertices.reserve(geom.vertices.size() * (sizeof(Geometry::Vertex) + output->user_channels_count * sizeof(float))); 
+		for (u32 i = 0; i < (u32)geom.vertices.size(); ++i) {
+			user_vertices.write(geom.vertices[i]);
+			const u8 v[] = { 0xff, 0, 0xff, 0xff };
+			user_vertices.write(&v, sizeof(u8) * output->user_channels_count);
+		}
+		vertices = user_vertices;
+	}
 	scene->setProceduralGeometry(selected[0], vertices, decl, indices, gpu::DataType::U32);
 	scene->setProceduralGeometryMaterial(selected[0], Path(m_resource->m_material));
 }
