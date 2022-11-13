@@ -332,9 +332,9 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		InputMemoryStream blob(data);
 		m_resource->deserialize(blob, path);
 
+		m_path = path;
 		pushRecent(path);
 		pushUndo(NO_MERGE_UNDO);
-		m_path = path;
 	}
 
 	void pushRecent(const char* path) {
@@ -438,6 +438,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 					if (ImGui::MenuItem("Save As")) {
 						if(getSavePath() && m_path.length() != 0) saveAs(m_path.c_str());
 					}
+					menuItem(m_apply_action, canApply());
 					if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
 						for (const String& path : m_recent_paths) {
 							if (ImGui::MenuItem(path.c_str())) load(path.c_str());
@@ -451,7 +452,6 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 					menuItem(m_redo_action, canRedo());
 					ImGui::EndMenu();
 				}
-				menuItem(m_apply_action, canApply());
 				ImGui::EndMenuBar();
 			}
 
