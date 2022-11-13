@@ -104,6 +104,7 @@ struct Node {
 struct Link {
 	u32 from;
 	u32 to;
+	u32 color = 0xffFFffFF;
 };
 
 struct Header {
@@ -199,23 +200,23 @@ struct EditorResource {
 
 static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
 
-struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
+struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, UniquePtr<Node>, Link> {
 	ProceduralGeomPlugin(StudioApp& app)
 		: m_app(app)
 		, m_allocator(app.getAllocator())
 		, m_recent_paths(app.getAllocator())
-		, m_undo_stack(app.getAllocator())
+		, NodeEditor(app.getAllocator())
 	{
 		m_delete_action.init(ICON_FA_TRASH "Delete", "Procedural geometry editor delete", "proc_geom_editor_delete", ICON_FA_TRASH, os::Keycode::DEL, Action::Modifiers::NONE, true);
 		m_delete_action.func.bind<&ProceduralGeomPlugin::deleteSelectedNodes>(this);
 		m_delete_action.plugin = this;
 
 		m_undo_action.init(ICON_FA_UNDO "Undo", "Procedural geometry editor undo", "proc_geom_editor_undo", ICON_FA_UNDO, os::Keycode::Z, Action::Modifiers::CTRL, true);
-		m_undo_action.func.bind<&ProceduralGeomPlugin::undo>(this);
+		m_undo_action.func.bind<&ProceduralGeomPlugin::undo>((SimpleUndoRedo*)this);
 		m_undo_action.plugin = this;
 
 		m_redo_action.init(ICON_FA_REDO "Redo", "Procedural geometry editor redo", "proc_geom_editor_redo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
-		m_redo_action.func.bind<&ProceduralGeomPlugin::redo>(this);
+		m_redo_action.func.bind<&ProceduralGeomPlugin::redo>((SimpleUndoRedo*)this);
 		m_redo_action.plugin = this;
 
 		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", true);
@@ -237,30 +238,58 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 		m_app.removeAction(&m_delete_action);
 	}
 	
+	void onCanvasClicked(ImVec2 pos) override {
+		static const struct {
+			char key;
+			NodeType type;
+		} types[] = {
+			{ 'C', NodeType::CUBE },
+			{ 'G', NodeType::GRID },
+			{ 'L', NodeType::LINE },
+			{ 'M', NodeType::MERGE },
+			{ 'S', NodeType::SPLINE },
+			{ 'T', NodeType::TRANSFORM },
+		};
+		for (const auto& t : types) {
+			if (os::isKeyDown((os::Keycode)t.key)) {
+				const ImVec2 mp = ImGui::GetMousePos() - m_offset;
+				addNode(t.type, mp, true);
+				break;
+			}
+		}
+	}
+
+	void onLinkDoubleClicked(Link& link, ImVec2 pos) override {}
+
+	void onContextMenu(bool recently_opened, ImVec2 pos) override {
+		static char filter[64] = "";
+		Node* new_node = nullptr;
+		if (ImGui::MenuItem("Circle")) new_node = addNode(NodeType::CIRCLE, pos, true);
+		if (ImGui::MenuItem("Cone")) new_node = addNode(NodeType::CONE, pos, true);
+		if (ImGui::MenuItem("Cube")) new_node = addNode(NodeType::CUBE, pos, true);
+		if (ImGui::MenuItem("Cylinder")) new_node = addNode(NodeType::CYLINDER, pos, true);
+		if (ImGui::MenuItem("Grid")) new_node = addNode(NodeType::GRID, pos, true);
+		if (ImGui::MenuItem("Line")) new_node = addNode(NodeType::LINE, pos, true);
+		if (ImGui::MenuItem("Merge")) new_node = addNode(NodeType::MERGE, pos, true);
+		if (ImGui::MenuItem("Sphere")) new_node = addNode(NodeType::SPHERE, pos, true);
+		if (ImGui::MenuItem("Spline")) new_node = addNode(NodeType::SPLINE, pos, true);
+		if (ImGui::MenuItem("Transform")) new_node = addNode(NodeType::TRANSFORM, pos, true);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		LUMIX_DELETE(m_allocator, m_resource);
+		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
+		m_resource->deserialize(blob, "");
+	}
+	
+	void serialize(OutputMemoryStream& blob) override {
+		m_resource->serialize(blob);
+	}
+
 	void deleteSelectedNodes() {
 		if (m_is_any_item_active) return;
 		m_resource->deleteSelectedNodes();
-		pushUndo(0xffFF);
-	}
-
-	void undo() {
-		if (m_undo_stack_idx <= 0) return;
-	
-		LUMIX_DELETE(m_allocator, m_resource);
-		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
-
-		m_resource->deserialize(InputMemoryStream(m_undo_stack[m_undo_stack_idx - 1].blob), "");
-		--m_undo_stack_idx;
-	}
-
-	void redo() {
-		if (m_undo_stack_idx + 1 >= m_undo_stack.size()) return;
-	
-		LUMIX_DELETE(m_allocator, m_resource);
-		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
-
-		m_resource->deserialize(InputMemoryStream(m_undo_stack[m_undo_stack_idx + 1].blob), "");
-		++m_undo_stack_idx;
+		pushUndo(NO_MERGE_UNDO);
 	}
 
 	bool isOpen() const { return m_is_open; }
@@ -306,10 +335,8 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 	void clear() {
 		LUMIX_DELETE(m_allocator, m_resource);
 		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
-		m_undo_stack.clear();
-		m_undo_stack_idx = -1;
+		clearUndoStack();
 	}
-
 
 	void save() {
 		if (m_path.length() == 0) {
@@ -363,30 +390,13 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 		}
 	}
 
-	void pushUndo(u16 id) {
-		while (m_undo_stack.size() > m_undo_stack_idx + 1) m_undo_stack.pop();
-		Undo u(m_allocator);
-		u.id = id;
-		m_resource->serialize(u.blob);
-		if (id == 0xffFF || m_undo_stack.back().id != id) {
-			m_undo_stack.push(static_cast<Undo&&>(u));
-			++m_undo_stack_idx;
-		}
-		else {
-			m_undo_stack.back() = static_cast<Undo&&>(u);
-		}
-	}
-
-	bool canUndo() const { return m_undo_stack_idx > 0; }
-	bool canRedo() const { return m_undo_stack_idx < m_undo_stack.size() - 1; }
-
 	void newGraph() {
 		clear();
 		m_path = "";
 	
 		addNode(NodeType::OUTPUT, ImVec2(100, 100), false);
 
-		pushUndo(0xffFF);
+		pushUndo(NO_MERGE_UNDO);
 	}
 
 	bool getSavePath() {
@@ -433,6 +443,10 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 			Span span(m_resource->m_material.getMutableData(), m_resource->m_material.capacity());
 			m_app.getAssetBrowser().resourceInput("material", span, Material::TYPE);
 
+			nodeEditorGUI(*m_resource);
+
+#if 0
+
 			m_canvas.begin();
 			ImGuiEx::BeginNodeEditor("pg", &m_offset);
 
@@ -476,7 +490,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 			if (ImGuiEx::GetNewLink(&newfrom, &newto)) {
 				m_resource->m_links.eraseItems([&](const Link& link){ return link.to == newto; });
 				m_resource->m_links.emplace(Link{newfrom, newto});
-				pushUndo(0xffFF);
+				pushUndo(NO_MERGE_UNDO);
 			}
 
 			ImGuiEx::EndNodeEditor();
@@ -484,7 +498,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 			if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
 				if (ImGui::GetIO().KeyAlt && hovered_link != -1) {
 					m_resource->m_links.erase(hovered_link);
-					pushUndo(0xffFF);
+					pushUndo(NO_MERGE_UNDO);
 				}
 				else {
 					static const struct {
@@ -534,6 +548,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 			m_is_any_item_active = ImGui::IsAnyItemActive();
 
 			m_canvas.end();
+#endif
 		}
 		ImGui::End();
 	}
@@ -543,29 +558,16 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin {
 
 	const char* getName() const override { return "procedural_geom"; }
 	
-	struct Undo {
-		Undo(IAllocator& allocator) : blob(allocator) {}
-		u16 id;
-		OutputMemoryStream blob;
-	};
-
-	Array<Undo> m_undo_stack;
-	i32 m_undo_stack_idx = -1;
-
 	IAllocator& m_allocator;
 	StudioApp& m_app;
-	ImVec2 m_offset = ImVec2(0, 0);
-	ImGuiEx::Canvas m_canvas;
 	bool m_is_open = true;
 	Array<String> m_recent_paths;
-	ImVec2 m_context_pos;
 	bool m_has_focus = false;
 	Action m_toggle_ui;
 	Action m_delete_action;
 	Action m_undo_action;
 	Action m_redo_action;
 	Path m_path;
-	bool m_is_any_item_active = false;
 	EditorResource* m_resource = nullptr;
 };
 
@@ -1383,7 +1385,7 @@ Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 Node* ProceduralGeomPlugin::addNode(NodeType type, ImVec2 pos, bool save_undo) {
 	Node* n = m_resource->createNode(type, pos);
 	n->m_pos = pos;
-	if (save_undo) pushUndo(0xffFF);
+	if (save_undo) pushUndo(NO_MERGE_UNDO);
 	return n;
 }
 
