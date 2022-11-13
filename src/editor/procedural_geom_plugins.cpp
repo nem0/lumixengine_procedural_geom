@@ -105,6 +105,12 @@ struct Link {
 	u32 from;
 	u32 to;
 	u32 color = 0xffFFffFF;
+
+	u16 getToNode() const { return u16(to); }
+	u16 getFromNode() const { return u16(from); }
+
+	u16 getToPin() const { return u16(to >> 16); }
+	u16 getFromPin() const { return u16(from >> 16); }
 };
 
 struct Header {
@@ -134,7 +140,7 @@ struct EditorResource {
 			Node* node = m_nodes[i].get();
 			if (node->m_selected) {
 				for (i32 j = m_links.size() - 1; j >= 0; --j) {
-					if (toNodeId(m_links[j].from) == node->m_id || toNodeId(m_links[j].to) == node->m_id) {
+					if (m_links[j].getFromNode() == node->m_id || m_links[j].getToNode() == node->m_id) {
 						m_links.erase(j);
 					}
 				}
@@ -319,6 +325,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		m_resource->deserialize(blob, path);
 
 		pushRecent(path);
+		pushUndo(NO_MERGE_UNDO);
 		m_path = path;
 	}
 
