@@ -153,6 +153,7 @@ struct EditorResource {
 	void serialize(OutputMemoryStream& blob) {
 		Header header;
 		blob.write(header);
+		blob.write(m_node_id_genereator);
 		blob.writeString(m_material.c_str());
 		blob.write(m_nodes.size());
 		for (UniquePtr<Node>& node : m_nodes) {
@@ -171,11 +172,12 @@ struct EditorResource {
 
 		Header header;
 		blob.read(header);
-		m_material = blob.readString();
 		if (header.magic != Header::MAGIC) {
 			logError("Corrupted file ", path);
 			return;
 		}
+		blob.read(m_node_id_genereator);
+		m_material = blob.readString();
 		u32 count;
 		blob.read(count);
 		m_nodes.reserve(count);
@@ -225,6 +227,10 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		m_redo_action.func.bind<&ProceduralGeomPlugin::redo>((SimpleUndoRedo*)this);
 		m_redo_action.plugin = this;
 
+		m_apply_action.init("Apply", "Procedural geometry editor apply", "proc_geom_editor_apply", ICON_FA_CHECK, os::Keycode::E, Action::Modifiers::CTRL, true);
+		m_apply_action.func.bind<&ProceduralGeomPlugin::apply>(this);
+		m_apply_action.plugin = this;
+
 		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", true);
 		m_toggle_ui.func.bind<&ProceduralGeomPlugin::toggleOpen>(this);
 		m_toggle_ui.is_selected.bind<&ProceduralGeomPlugin::isOpen>(this);
@@ -233,6 +239,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		app.addAction(&m_undo_action);
 		app.addAction(&m_redo_action);
 		app.addAction(&m_delete_action);
+		app.addAction(&m_apply_action);
 
 		newGraph();
 	}
@@ -242,6 +249,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		m_app.removeAction(&m_undo_action);
 		m_app.removeAction(&m_redo_action);
 		m_app.removeAction(&m_delete_action);
+		m_app.removeAction(&m_apply_action);
 	}
 	
 	void onCanvasClicked(ImVec2 pos) override {
@@ -443,7 +451,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 					menuItem(m_redo_action, canRedo());
 					ImGui::EndMenu();
 				}
-				if (ImGui::MenuItem("Apply", nullptr, false, m_resource->m_material.length() != 0)) apply();
+				menuItem(m_apply_action, canApply());
 				ImGui::EndMenuBar();
 			}
 
@@ -451,115 +459,15 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 			m_app.getAssetBrowser().resourceInput("material", span, Material::TYPE);
 
 			nodeEditorGUI(*m_resource);
-
-#if 0
-
-			m_canvas.begin();
-			ImGuiEx::BeginNodeEditor("pg", &m_offset);
-
-			u32 moved_count = 0;
-			u16 moved = 0xffFF;
-			for (UniquePtr<Node>& node : m_resource->m_nodes) {
-				const ImVec2 old_pos = node->m_pos;
-				if (node->nodeGUI()) {
-					pushUndo(node->m_id);
-				}
-				if (node->m_pos.x != old_pos.x || node->m_pos.y != old_pos.y) {
-					++moved_count;
-					moved = node->m_id;
-				}
-			}
-			if (moved_count > 0) {
-				if (moved_count > 1) pushUndo(0xffFE);
-				else pushUndo(moved);
-			}
-
-			i32 hovered_link = -1;
-			for (i32 i = 0, c = m_resource->m_links.size(); i < c; ++i) {
-				const Link& link = m_resource->m_links[i];
-				ImGuiEx::NodeLink(link.from | OUTPUT_FLAG, link.to);
-				if (ImGuiEx::IsLinkHovered()) {
-					if (ImGui::IsMouseClicked(0) && ImGui::GetIO().KeyCtrl) {
-						if (ImGuiEx::IsLinkStartHovered()) {
-							ImGuiEx::StartNewLink(link.to, true);
-						}
-						else {
-							ImGuiEx::StartNewLink(link.from | OUTPUT_FLAG, false);
-						}
-						m_resource->m_links.erase(i);
-						--c;
-					}
-					hovered_link = i;
-				}
-			}
-
-			u32 newfrom, newto;
-			if (ImGuiEx::GetNewLink(&newfrom, &newto)) {
-				m_resource->m_links.eraseItems([&](const Link& link){ return link.to == newto; });
-				m_resource->m_links.emplace(Link{newfrom, newto});
-				pushUndo(NO_MERGE_UNDO);
-			}
-
-			ImGuiEx::EndNodeEditor();
-
-			if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(0)) {
-				if (ImGui::GetIO().KeyAlt && hovered_link != -1) {
-					m_resource->m_links.erase(hovered_link);
-					pushUndo(NO_MERGE_UNDO);
-				}
-				else {
-					static const struct {
-						char key;
-						NodeType type;
-					} types[] = {
-						{ 'C', NodeType::CUBE },
-						{ 'G', NodeType::GRID },
-						{ 'L', NodeType::LINE },
-						{ 'M', NodeType::MERGE },
-						{ 'S', NodeType::SPLINE },
-						{ 'T', NodeType::TRANSFORM },
-					};
-					for (const auto& t : types) {
-						if (os::isKeyDown((os::Keycode)t.key)) {
-							const ImVec2 mp = ImGui::GetMousePos() - m_offset;
-							addNode(t.type, mp, true);
-							break;
-						}
-					}
-				}
-			}
-
-			if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(1)) {
-				m_context_pos = ImGui::GetMousePos() - m_offset;
-				ImGui::OpenPopup("context_menu");
-			}
-
-			if(ImGui::BeginPopup("context_menu")) {
-				static char filter[64] = "";
-				
-				Node* new_node = nullptr;
-				if (ImGui::MenuItem("Circle")) new_node = addNode(NodeType::CIRCLE, m_context_pos, true);
-				if (ImGui::MenuItem("Cone")) new_node = addNode(NodeType::CONE, m_context_pos, true);
-				if (ImGui::MenuItem("Cube")) new_node = addNode(NodeType::CUBE, m_context_pos, true);
-				if (ImGui::MenuItem("Cylinder")) new_node = addNode(NodeType::CYLINDER, m_context_pos, true);
-				if (ImGui::MenuItem("Grid")) new_node = addNode(NodeType::GRID, m_context_pos, true);
-				if (ImGui::MenuItem("Line")) new_node = addNode(NodeType::LINE, m_context_pos, true);
-				if (ImGui::MenuItem("Merge")) new_node = addNode(NodeType::MERGE, m_context_pos, true);
-				if (ImGui::MenuItem("Sphere")) new_node = addNode(NodeType::SPHERE, m_context_pos, true);
-				if (ImGui::MenuItem("Spline")) new_node = addNode(NodeType::SPLINE, m_context_pos, true);
-				if (ImGui::MenuItem("Transform")) new_node = addNode(NodeType::TRANSFORM, m_context_pos, true);
-
-				ImGui::EndPopup();
-			}		
-
-			m_is_any_item_active = ImGui::IsAnyItemActive();
-
-			m_canvas.end();
-#endif
 		}
 		ImGui::End();
 	}
 	
+
+	bool canApply() {
+		return m_resource->m_material.length() != 0 && !m_app.getWorldEditor().getSelectedEntities().empty();
+	}
+
 	void apply();
 	Node* addNode(NodeType type, ImVec2 pos, bool save_undo);
 
@@ -574,6 +482,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 	Action m_delete_action;
 	Action m_undo_action;
 	Action m_redo_action;
+	Action m_apply_action;
 	Path m_path;
 	EditorResource* m_resource = nullptr;
 };
@@ -621,18 +530,14 @@ struct CircleNode : Node {
 	}
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		result->vertices.reserve(subdivision);
-		result->indices.reserve(subdivision + 1);
-		for (u32 i = 0; i < subdivision; ++i) {
+		result->vertices.reserve(subdivision + 1);
+		for (u32 i = 0; i <= subdivision; ++i) {
 			const float a = i / (float)subdivision * PI * 2;
 			Geometry::Vertex& v = result->vertices.emplace();
 			v.position = Vec3(cosf(a) * radius, sinf(a) * radius, 0);
 			v.normal = normalize(v.position);
 			v.tangent = Vec3(-v.position.y, v.position.x, 0);
 			v.uv = Vec2(i / (float)subdivision, 0);
-		}
-		for (u32 i = 0; i <= subdivision; ++i) {
-			result->indices.push(i % subdivision);
 		}
 		result->type = gpu::PrimitiveType::LINES;
 		return true;
