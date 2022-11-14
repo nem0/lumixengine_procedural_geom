@@ -17,6 +17,7 @@
 #include "engine/string.h"
 #include "engine/universe.h"
 #include "renderer/material.h"
+#include "renderer/model.h"
 #include "renderer/render_scene.h"
 #include <math.h>
 #include <stdlib.h>
@@ -49,7 +50,8 @@ enum class NodeType : u32 {
 	LINE,
 	CIRCLE,
 	POINT,
-	INSTANTIATE_PREFAB
+	INSTANTIATE_PREFAB,
+	MODEL
 };
 
 struct Geometry {
@@ -312,6 +314,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		if (ImGui::MenuItem("Instantiate prefab")) new_node = addNode(NodeType::INSTANTIATE_PREFAB, pos, true);
 		if (ImGui::MenuItem("Line")) new_node = addNode(NodeType::LINE, pos, true);
 		if (ImGui::MenuItem("Merge")) new_node = addNode(NodeType::MERGE, pos, true);
+		if (ImGui::MenuItem("Model")) new_node = addNode(NodeType::MODEL, pos, true);
 		if (ImGui::MenuItem("Place instances at points")) new_node = addNode(NodeType::PLACE_INSTANCES_AT_POINTS, pos, true);
 		if (ImGui::MenuItem("Point")) new_node = addNode(NodeType::POINT, pos, true);
 		if (ImGui::MenuItem("Sphere")) new_node = addNode(NodeType::SPHERE, pos, true);
@@ -677,13 +680,97 @@ struct PlaceInstancesAtPoints : Node {
 	}
 };
 
+struct ModelNode : Node {
+	~ModelNode() {
+		if (m_model) m_model->decRefCount();
+	}
+
+	NodeType getType() override { return NodeType::MODEL; }
+
+	void serialize(OutputMemoryStream& blob) override {
+		blob.writeString(m_model ? m_model->getPath().c_str() : "");
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		const char* path = blob.readString();
+		if (path[0]) {
+			ResourceManagerHub& rm = m_resource->m_app.getEngine().getResourceManager();
+			m_model = rm.load<Model>(Path(path));
+		}
+		else {
+			m_model = nullptr;
+		}
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Model");
+		outputSlot();
+		char path[LUMIX_MAX_PATH];
+		copyString(path, m_model ? m_model->getPath().c_str() : "");
+		if (m_resource->m_app.getAssetBrowser().resourceInput("Asset", Span(path), Model::TYPE, 150)) {
+			if (m_model) m_model->decRefCount();
+			ResourceManagerHub& rm = m_resource->m_app.getEngine().getResourceManager();
+			m_model = rm.load<Model>(Path(path));
+			return true;
+		}
+		return false;
+	}
+
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		if (!m_model) return false;
+		if (!m_model->isReady()) return false;
+
+		for (u32 i = 0, c = m_model->getMeshCount(); i < c; ++i) {
+			const Mesh& mesh = m_model->getMesh(i);
+			
+			const u32 indices_offset = result->vertices.size();
+
+			for (const Vec3& vin : mesh.vertices) {
+				Geometry::Vertex& vout = result->vertices.emplace();
+				vout.position = vin;
+				// TODO get actual data
+				vout.uv = Vec2(0, 0);
+				vout.normal = Vec3(0, 1, 0);
+				vout.tangent = Vec3(1, 0, 0);
+			}
+
+			const bool are_indices_16bit = mesh.areIndices16();
+			const u32 index_size = are_indices_16bit ? 2 : 4;
+			for (u32 j = 0, c = mesh.indices_count; j < c; ++j) {
+				u32 idx = are_indices_16bit ? *(u16*)(mesh.indices.data() + j * 2) : *(u32*)(mesh.indices.data() + j * 4);
+				result->indices.push(idx + indices_offset);
+			}
+		}
+
+		result->type = gpu::PrimitiveType::TRIANGLES;
+		return true;
+	}
+
+	Model* m_model = nullptr;
+};
+
 struct InstantiatePrefabNode : Node {
 	~InstantiatePrefabNode() {
 		if (m_prefab) m_prefab->decRefCount();
 	}
 
 	NodeType getType() override { return NodeType::INSTANTIATE_PREFAB; }
-	
+
+	void serialize(OutputMemoryStream& blob) override {
+		blob.writeString(m_prefab ? m_prefab->getPath().c_str() : "");
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		const char* path = blob.readString();
+		if (path[0]) {
+			ResourceManagerHub& rm = m_resource->m_app.getEngine().getResourceManager();
+			m_prefab = rm.load<PrefabResource>(Path(path));
+		}
+		else {
+			m_prefab = nullptr;
+		}
+	}
+
 	bool gui() override {
 		ImGuiEx::NodeTitle("Instantiate prefab");
 		inputSlot();
@@ -920,7 +1007,6 @@ struct SplineNode : Node {
 		blob.read(width);
 		blob.read(step);
 	}
-
 
 	float width = 1;
 	float step = 0.1f;
@@ -1529,6 +1615,7 @@ Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 		case NodeType::LINE: node = UniquePtr<LineNode>::create(m_allocator); break;
 		case NodeType::POINT: node = UniquePtr<PointNode>::create(m_allocator); break;
 		case NodeType::SPLINE: node = UniquePtr<SplineNode>::create(m_allocator); break;
+		case NodeType::MODEL: node = UniquePtr<ModelNode>::create(m_allocator); break;
 		case NodeType::INSTANTIATE_PREFAB: node = UniquePtr<InstantiatePrefabNode>::create(m_allocator); break;
 		case NodeType::PLACE_INSTANCES_AT_POINTS: node = UniquePtr<PlaceInstancesAtPoints>::create(m_allocator); break;
 		case NodeType::CYLINDER: node = UniquePtr<CylinderNode>::create(m_allocator); break;
