@@ -90,6 +90,10 @@ struct Node {
 	virtual void serialize(OutputMemoryStream& blob) {}
 	virtual void deserialize(InputMemoryStream& blob) {}
 
+	// TODO
+	bool hasInputPins() const { return false; }
+	bool hasOutputPins() const { return false; }
+
 	Input getInput(u16 input) const;
 
 	bool nodeGUI() {
