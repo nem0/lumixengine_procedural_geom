@@ -691,14 +691,11 @@ struct InstantiatePrefabNode : Node {
 		char path[LUMIX_MAX_PATH];
 		copyString(path, m_prefab ? m_prefab->getPath().c_str() : "");
 		ResourceManagerHub& rm = m_resource->m_app.getEngine().getResourceManager();
-		ImGui::BeginChild("muhaha", ImVec2(150, 150));
-		if (m_resource->m_app.getAssetBrowser().resourceInput("Prefab", Span(path), PrefabResource::TYPE)) {
+		if (m_resource->m_app.getAssetBrowser().resourceInput("Prefab", Span(path), PrefabResource::TYPE, 150)) {
 			if (m_prefab) m_prefab->decRefCount();
 			m_prefab = rm.load<PrefabResource>(Path(path));
-			ImGui::EndChild();
 			return true;
 		}
-		ImGui::EndChild();
 		return false;
 	}
 	
@@ -1484,12 +1481,19 @@ struct OutputGeometryNode : Node {
 };
 
 void ProceduralGeomPlugin::apply() {	
+	const Array<EntityRef>& selected = m_app.getWorldEditor().getSelectedEntities();
+	if (selected.size() != 1) return;
+
+	for (const UniquePtr<Node>& node : m_resource->m_nodes) {
+		if (node->getType() == NodeType::INSTANTIATE_PREFAB) {
+			InstantiatePrefabNode* n = (InstantiatePrefabNode*)node.get();
+			n->instantiate(selected[0]);
+		}
+	}
+
 	OutputGeometryNode* output = (OutputGeometryNode*)m_resource->m_nodes[0].get();
 	Geometry geom(m_allocator);
 	if (!output->getGeometry(0, &geom)) return;
-
-	const Array<EntityRef>& selected = m_app.getWorldEditor().getSelectedEntities();
-	if (selected.size() != 1) return;
 
 	Universe* universe = m_app.getWorldEditor().getUniverse();
 	RenderScene* scene = (RenderScene*)universe->getScene("renderer");
@@ -1516,12 +1520,6 @@ void ProceduralGeomPlugin::apply() {
 	scene->setProceduralGeometry(selected[0], vertices, decl, indices, gpu::DataType::U32);
 	scene->setProceduralGeometryMaterial(selected[0], Path(m_resource->m_material));
 
-	for (const UniquePtr<Node>& node : m_resource->m_nodes) {
-		if (node->getType() == NodeType::INSTANTIATE_PREFAB) {
-			InstantiatePrefabNode* n = (InstantiatePrefabNode*)node.get();
-			n->instantiate(selected[0]);
-		}
-	}
 }
 
 Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
