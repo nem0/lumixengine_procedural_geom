@@ -1,5 +1,6 @@
 #define LUMIX_NO_CUSTOM_CRT
 #include "editor/asset_browser.h"
+#include "editor/prefab_system.h"
 #include "editor/settings.h"
 #include "editor/studio_app.h"
 #include "editor/utils.h"
@@ -8,13 +9,17 @@
 #include "engine/array.h"
 #include "engine/core.h"
 #include "engine/crt.h"
+#include "engine/engine.h"
 #include "engine/log.h"
 #include "engine/os.h"
+#include "engine/prefab.h"
+#include "engine/resource_manager.h"
 #include "engine/string.h"
 #include "engine/universe.h"
 #include "renderer/material.h"
 #include "renderer/render_scene.h"
 #include <math.h>
+#include <stdlib.h>
 
 #include "imgui/imgui.h"
 
@@ -33,6 +38,7 @@ enum class NodeType : u32 {
 	OUTPUT,
 	CUBE,
 	DISTRIBUTE_POINT_ON_FACES,
+	PLACE_INSTANCES_AT_POINTS,
 	GRID,
 	TRANSFORM,
 	MERGE,
@@ -41,7 +47,9 @@ enum class NodeType : u32 {
 	CYLINDER,
 	SPLINE,
 	LINE,
-	CIRCLE
+	CIRCLE,
+	POINT,
+	INSTANTIATE_PREFAB
 };
 
 struct Geometry {
@@ -64,6 +72,13 @@ struct Geometry {
 	gpu::PrimitiveType type;
 };
 
+struct Input {
+	struct Node* node = nullptr;
+	u16 output_idx;
+	[[nodiscard]] bool getGeometry(Geometry* result) const;
+	operator bool() const { return node != nullptr; }
+};
+
 struct Node {
 	virtual bool gui() = 0;
 
@@ -72,6 +87,8 @@ struct Node {
 	virtual bool getGeometry(u16 output_idx, Geometry* result) = 0;
 	virtual void serialize(OutputMemoryStream& blob) {}
 	virtual void deserialize(InputMemoryStream& blob) {}
+
+	Input getInput(u16 input) const;
 
 	bool nodeGUI() {
 		ImGuiEx::BeginNode(m_id, m_pos, &m_selected);
@@ -231,6 +248,10 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		m_apply_action.func.bind<&ProceduralGeomPlugin::apply>(this);
 		m_apply_action.plugin = this;
 
+		m_save_action.init(ICON_FA_SAVE "Save", "Procedural geometry editor save", "proc_geom_editor_save", ICON_FA_SAVE, os::Keycode::S, Action::Modifiers::CTRL, true);
+		m_save_action.func.bind<&ProceduralGeomPlugin::save>(this);
+		m_save_action.plugin = this;
+
 		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", true);
 		m_toggle_ui.func.bind<&ProceduralGeomPlugin::toggleOpen>(this);
 		m_toggle_ui.is_selected.bind<&ProceduralGeomPlugin::isOpen>(this);
@@ -240,6 +261,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		app.addAction(&m_redo_action);
 		app.addAction(&m_delete_action);
 		app.addAction(&m_apply_action);
+		app.addAction(&m_save_action);
 
 		newGraph();
 	}
@@ -250,6 +272,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		m_app.removeAction(&m_redo_action);
 		m_app.removeAction(&m_delete_action);
 		m_app.removeAction(&m_apply_action);
+		m_app.removeAction(&m_save_action);
 	}
 	
 	void onCanvasClicked(ImVec2 pos) override {
@@ -259,8 +282,10 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		} types[] = {
 			{ 'C', NodeType::CUBE },
 			{ 'G', NodeType::GRID },
+			{ 'I', NodeType::PLACE_INSTANCES_AT_POINTS },
 			{ 'L', NodeType::LINE },
 			{ 'M', NodeType::MERGE },
+			{ 'P', NodeType::POINT },
 			{ 'S', NodeType::SPLINE },
 			{ 'T', NodeType::TRANSFORM },
 		};
@@ -282,9 +307,13 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		if (ImGui::MenuItem("Cone")) new_node = addNode(NodeType::CONE, pos, true);
 		if (ImGui::MenuItem("Cube")) new_node = addNode(NodeType::CUBE, pos, true);
 		if (ImGui::MenuItem("Cylinder")) new_node = addNode(NodeType::CYLINDER, pos, true);
+		if (ImGui::MenuItem("Distribute points on faces")) new_node = addNode(NodeType::DISTRIBUTE_POINT_ON_FACES, pos, true);
 		if (ImGui::MenuItem("Grid")) new_node = addNode(NodeType::GRID, pos, true);
+		if (ImGui::MenuItem("Instantiate prefab")) new_node = addNode(NodeType::INSTANTIATE_PREFAB, pos, true);
 		if (ImGui::MenuItem("Line")) new_node = addNode(NodeType::LINE, pos, true);
 		if (ImGui::MenuItem("Merge")) new_node = addNode(NodeType::MERGE, pos, true);
+		if (ImGui::MenuItem("Place instances at points")) new_node = addNode(NodeType::PLACE_INSTANCES_AT_POINTS, pos, true);
+		if (ImGui::MenuItem("Point")) new_node = addNode(NodeType::POINT, pos, true);
 		if (ImGui::MenuItem("Sphere")) new_node = addNode(NodeType::SPHERE, pos, true);
 		if (ImGui::MenuItem("Spline")) new_node = addNode(NodeType::SPLINE, pos, true);
 		if (ImGui::MenuItem("Transform")) new_node = addNode(NodeType::TRANSFORM, pos, true);
@@ -434,7 +463,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 				if (ImGui::BeginMenu("File")) {
 					if (ImGui::MenuItem("New")) newGraph();
 					if (ImGui::MenuItem("Load")) load();
-					if (ImGui::MenuItem("Save")) save();
+					menuItem(m_save_action, canApply());
 					if (ImGui::MenuItem("Save As")) {
 						if(getSavePath() && m_path.length() != 0) saveAs(m_path.c_str());
 					}
@@ -455,8 +484,9 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 				ImGui::EndMenuBar();
 			}
 
-			Span span(m_resource->m_material.getMutableData(), m_resource->m_material.capacity());
+			Span span(m_resource->m_material.beginUpdate(), m_resource->m_material.capacity());
 			m_app.getAssetBrowser().resourceInput("material", span, Material::TYPE);
+			m_resource->m_material.endUpdate();	
 
 			nodeEditorGUI(*m_resource);
 		}
@@ -483,6 +513,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 	Action m_undo_action;
 	Action m_redo_action;
 	Action m_apply_action;
+	Action m_save_action;
 	Path m_path;
 	EditorResource* m_resource = nullptr;
 };
@@ -500,16 +531,11 @@ static void	forEachInput(const EditorResource& resource, int node_id, const F& f
 	}
 }
 
-struct Input {
-	Node* node = nullptr;
-	u16 output_idx;
-	bool getGeometry(Geometry* result) const { return node->getGeometry(output_idx, result); }
-	operator bool() const { return node != nullptr; }
-};
+bool Input::getGeometry(Geometry* result) const { return node->getGeometry(output_idx, result); }
 
-static Input getInput(const EditorResource& resource, u16 node_id, u16 input_idx) {
+Input Node::getInput(u16 input_idx) const {
 	Input res;
-	forEachInput(resource, node_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
+	forEachInput(*m_resource, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
 		if (to_attr == input_idx) {
 			res.output_idx = from_attr;
 			res.node = from;
@@ -595,38 +621,190 @@ struct LineNode : Node {
 	u32 subdivision = 16;
 };
 
+struct PlaceInstancesAtPoints : Node {
+	NodeType getType() override { return NodeType::PLACE_INSTANCES_AT_POINTS; }
+
+	bool gui() override {
+		ImGuiEx::NodeTitle("Place instances at points");
+		ImGui::BeginGroup();
+		inputSlot(); ImGui::TextUnformatted("Points");
+		inputSlot(); ImGui::TextUnformatted("Instance");
+		ImGui::EndGroup();
+		ImGui::SameLine();
+		outputSlot();
+		return false;
+	}
+
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		const Input points_input = getInput(0);
+		if (!points_input) return false;
+		const Input instance_inputs = getInput(1);
+		if (!instance_inputs) return false;
+
+		Geometry points(*m_allocator);
+		Geometry instance(*m_allocator);
+		if (!points_input.getGeometry(&points)) return false;
+		if (!instance_inputs.getGeometry(&instance)) return false;
+
+		if (instance.type != gpu::PrimitiveType::TRIANGLES) return false;
+
+		result->vertices.reserve(points.vertices.size() * instance.vertices.size());
+		result->indices.reserve(points.indices.size() * instance.indices.size());
+
+		for (const Geometry::Vertex& point : points.vertices) {
+			Matrix mtx;
+			const Vec3 dir = cross(point.normal, point.tangent);
+			mtx.lookAt(point.position, point.position + dir, point.normal);
+			mtx = mtx.fastInverted();
+
+			const u32 index_offset = result->vertices.size();
+
+			for (const Geometry::Vertex& src_v : instance.vertices) {
+				Geometry::Vertex& v = result->vertices.emplace();
+				v = src_v;
+				v.position = mtx.transformPoint(v.position);
+				v.tangent = mtx.transformVector(v.tangent);
+				v.normal = mtx.transformVector(v.normal);
+			}
+
+			for (u32 idx : instance.indices) {
+				result->indices.push(index_offset + idx);
+			}
+		}
+		
+		result->type = gpu::PrimitiveType::TRIANGLES;
+		return true;
+	}
+};
+
+struct InstantiatePrefabNode : Node {
+	~InstantiatePrefabNode() {
+		if (m_prefab) m_prefab->decRefCount();
+	}
+
+	NodeType getType() override { return NodeType::INSTANTIATE_PREFAB; }
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Instantiate prefab");
+		inputSlot();
+		ImGui::TextUnformatted("Points");
+		char path[LUMIX_MAX_PATH];
+		copyString(path, m_prefab ? m_prefab->getPath().c_str() : "");
+		ResourceManagerHub& rm = m_resource->m_app.getEngine().getResourceManager();
+		ImGui::BeginChild("muhaha", ImVec2(150, 150));
+		if (m_resource->m_app.getAssetBrowser().resourceInput("Prefab", Span(path), PrefabResource::TYPE)) {
+			if (m_prefab) m_prefab->decRefCount();
+			m_prefab = rm.load<PrefabResource>(Path(path));
+			ImGui::EndChild();
+			return true;
+		}
+		ImGui::EndChild();
+		return false;
+	}
+	
+	void instantiate(EntityRef parent) {
+		if (!m_prefab || !m_prefab->isReady()) return;
+		
+		const Input input = getInput(0);
+		if (!input) return;
+
+		WorldEditor& editor = m_resource->m_app.getWorldEditor();
+		Universe& universe = *editor.getUniverse();
+		const Transform& transform = universe.getTransform(parent);
+		Geometry points(*m_allocator);
+		if (!input.getGeometry(&points)) return;
+
+		PrefabSystem& prefab_system = m_resource->m_app.getWorldEditor().getPrefabSystem();
+		for (const Geometry::Vertex& v : points.vertices) {
+			const DVec3 p = transform.transform(v.position);
+			// TODO rotation
+			const EntityPtr e = prefab_system.instantiatePrefab(*m_prefab, p, transform.rot, transform.scale);
+			if (e.isValid()) universe.setParent(parent, *e);
+		}
+	}
+
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		return false;
+	}
+
+	PrefabResource* m_prefab = nullptr;
+};
+
+struct SplineIterator {
+	SplineIterator(Span<const Vec3> points) : points(points) {}
+
+	void move(float delta) { t += delta; }
+	bool isEnd() { return u32(t) >= points.length() - 2; }
+	Vec3 getNormal() const {
+		const u32 segment = u32(t);
+		Vec3 p0 = points[segment + 0];
+		Vec3 p1 = points[segment + 1];
+		Vec3 p2 = points[segment + 2];
+		Vec3 n = normalize(cross(p1 - p0, p1 - p2));
+		if (n.y < 0) n *= -1;
+		return n;
+	}
+
+	Vec3 getDir() const {
+		const u32 segment = u32(t);
+		float rel_t = t - segment;
+		Vec3 p0 = points[segment + 0];
+		Vec3 p1 = points[segment + 1];
+		Vec3 p2 = points[segment + 2];
+		return lerp(p1 - p0, p2 - p1, rel_t);
+	}
+
+	Vec3 getPosition() const {
+		const u32 segment = u32(t);
+		float rel_t = t - segment;
+		Vec3 p0 = points[segment + 0];
+		Vec3 p1 = points[segment + 1];
+		Vec3 p2 = points[segment + 2];
+		p0 = (p1 + p0) * 0.5f;
+		p2 = (p1 + p2) * 0.5f;
+
+		return lerp(lerp(p0, p1, rel_t), lerp(p1, p2, rel_t), rel_t);
+	}
+
+	float t = 0;
+
+	Span<const Vec3> points;
+};
+
+struct PointNode : Node {
+	NodeType getType() override { return NodeType::POINT; }
+
+	void serialize(OutputMemoryStream& blob) override {
+		blob.write(position);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(position);
+	}
+
+	bool gui() override {
+		ImGuiEx::NodeTitle("Point");
+		outputSlot();
+		bool res = ImGui::DragFloat("X", &position.x);
+		ImGui::DragFloat("Y", &position.y) || res;
+		ImGui::DragFloat("Z", &position.z) || res;
+		return res;
+	}
+
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		Geometry::Vertex& v = result->vertices.emplace();
+		v.position = position;
+		v.normal = Vec3(0, 1, 0);
+		v.tangent = Vec3(1, 0, 0);
+		v.uv = Vec2(0, 0);
+		result->type = gpu::PrimitiveType::POINTS;
+		return true;
+	}
+
+	Vec3 position = Vec3(0, 0, 0);
+};
+
 struct SplineNode : Node {
-	struct SplineIterator {
-		SplineIterator(Span<const Vec3> points) : points(points) {}
-
-		void move(float delta) { t += delta; }
-		bool isEnd() { return u32(t) >= points.length() - 2; }
-		Vec3 getDir() {
-			const u32 segment = u32(t);
-			float rel_t = t - segment;
-			Vec3 p0 = points[segment + 0];
-			Vec3 p1 = points[segment + 1];
-			Vec3 p2 = points[segment + 2];
-			return lerp(p1 - p0, p2 - p1, rel_t);
-		}
-
-		Vec3 getPosition() {
-			const u32 segment = u32(t);
-			float rel_t = t - segment;
-			Vec3 p0 = points[segment + 0];
-			Vec3 p1 = points[segment + 1];
-			Vec3 p2 = points[segment + 2];
-			p0 = (p1 + p0) * 0.5f;
-			p2 = (p1 + p2) * 0.5f;
-
-			return lerp(lerp(p0, p1, rel_t), lerp(p1, p2, rel_t), rel_t);
-		}
-
-		float t = 0;
-
-		Span<const Vec3> points;
-	};
-
 	NodeType getType() override { return NodeType::SPLINE; }
 	
 	bool gui() override {
@@ -639,72 +817,69 @@ struct SplineNode : Node {
 	}
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input profile_input = getInput(*m_resource, m_id, 0);
-		if (!profile_input) return false;
-
-		Geometry profile(m_resource->m_allocator);
-		if (!profile_input.getGeometry(&profile)) return false;
-		if (profile.type != gpu::PrimitiveType::LINES) return false;
-
 		WorldEditor& editor = m_resource->m_app.getWorldEditor();
 		const Array<EntityRef>& selected = editor.getSelectedEntities();
 		if (selected.size() != 1) return false;
 
- 		Universe& universe = *editor.getUniverse();
+		Universe& universe = *editor.getUniverse();
 		if (!universe.hasComponent(selected[0], SPLINE_TYPE)) return false;
 
 		CoreScene* core_scene = (CoreScene*)universe.getScene(SPLINE_TYPE);
 		const Spline& spline = core_scene->getSpline(selected[0]);
 		if (spline.points.empty()) return false;
 
+		const Input profile_input = getInput(0);
+		if (!profile_input) return false;
+
+		Geometry profile(m_resource->m_allocator);
+		if (!profile_input.getGeometry(&profile)) return false;
+
 		SplineIterator iterator(spline.points);
+		if (profile.type == gpu::PrimitiveType::POINTS) {
+			float d = 0;
+			result->vertices.reserve(512);
+			Vec3 prev_p = spline.points[0];
+			while (!iterator.isEnd()) {
+				const Vec3 p = iterator.getPosition();
+				const Vec3 dir = iterator.getDir();
+				const Vec3 normal = iterator.getNormal();
+				const Vec3 side = normalize(cross(dir, normal));
 				
+				for (const Geometry::Vertex& profile_v : profile.vertices) {
+					Geometry::Vertex& v = result->vertices.emplace();
+					const Vec3& profile_p = profile_v.position;
+					v.position = p + profile_p.x * side + profile_p.y * normal;
+					v.normal = iterator.getNormal();
+					v.tangent = normalize(cross(dir, Vec3(0, 1, 0)));
+					v.uv = Vec2(0, d);
+				}
+				iterator.move(step);
+				d += length(p - prev_p);
+				prev_p = p;
+			}
+			result->type = gpu::PrimitiveType::POINTS;
+			return true;
+		}
+
+		if (profile.type != gpu::PrimitiveType::LINES) return false;
+
 		result->vertices.reserve(16 * 1024);
 
 		const Transform spline_tr = universe.getTransform(selected[0]);
 		const Transform spline_tr_inv = spline_tr.inverted();
-		/*
-		auto write_vertex = [&](const Vertex& v){
-			Vec3 position = v.position;
-			if (m_geometry_mode == GeometryMode::SNAP_ALL) {
-				const DVec3 p = spline_tr.transform(v.position) + Vec3(0, 1 + m_snap_height, 0);
-				const RayCastModelHit hit = render_scene->castRayTerrain(p, Vec3(0, -1, 0));
-				if (hit.is_hit) {
-					const DVec3 hp = hit.origin + (hit.t - m_snap_height) * hit.dir;
-					position = Vec3(spline_tr_inv.transform(hp));
-				}
-			}
-			vertices.write(position);
-			if (has_uvs) {
-				vertices.write(v.uv);
-			}
-			if (sg.num_user_channels > 0) {
-				u32 tmp = 0;
-				vertices.write(tmp);
-			}
-		};
-			*/			
+
 		float d = 0;
 		u32 rows = 0;
 		Vec3 prev_p = spline.points[0];
 		while (!iterator.isEnd()) {
 			++rows;
 			const Vec3 p = iterator.getPosition();
-			/*if (m_geometry_mode == GeometryMode::SNAP_CENTER) {
-				const DVec3 pglob = spline_tr.transform(p) + Vec3(0, 100 + m_snap_height, 0);
-				const RayCastModelHit hit = render_scene->castRayTerrain(pglob, Vec3(0, -1, 0));
-				if (hit.is_hit) {
-					const DVec3 hp = hit.origin + (hit.t - m_snap_height) * hit.dir;
-					p = Vec3(spline_tr_inv.transform(hp));
-				}
-			}*/
 
 			const Vec3 dir = normalize(iterator.getDir());
-			const Vec3 side = normalize(cross(dir, Vec3(0, 1, 0))) * width;
-			const Vec3 up = normalize(cross(side, dir));
+			const Vec3 up = iterator.getNormal();
+			const Vec3 side = normalize(cross(dir, up)) * width;
 			d += length(p - prev_p);
 
-			const Vec3 p0 = p - side;
 			const u32 w = profile.vertices.size();
 
 			for (u32 i = 0; i < w; ++i) {
@@ -946,40 +1121,43 @@ struct SphereNode : Node {
 	NodeType getType() override { return NodeType::SPHERE; }
 	void serialize(OutputMemoryStream& blob) override {
 		blob.write(size);
+		blob.write(subdivision);
 	}
 
 	void deserialize(InputMemoryStream& blob) override {
 		blob.read(size);
+		blob.read(subdivision);
 	}
 	
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		result->vertices.reserve(6 * size * size);
-		result->indices.reserve(12 * (size - 1));
+		result->vertices.reserve(6 * subdivision * subdivision);
+		result->indices.reserve(12 * (subdivision - 1));
 
 		auto push_side = [result, this](u32 coord0, u32 coord1, u32 coord2, float coord2_val){
 			const u32 offset = result->vertices.size();
-			for (u32 j = 0; j < size; ++j) {
-				for (u32 i = 0; i < size; ++i) {
+			for (u32 j = 0; j < subdivision; ++j) {
+				for (u32 i = 0; i < subdivision; ++i) {
 					Geometry::Vertex& v = result->vertices.emplace();
-					v.position[coord0] = i / float(size - 1) * 2 - 1;
-					v.position[coord1] = j / float(size - 1) * 2 - 1;
+					v.position[coord0] = i / float(subdivision - 1) * 2 - 1;
+					v.position[coord1] = j / float(subdivision - 1) * 2 - 1;
 					v.position[coord2] = coord2_val;
 					v.position = normalize(v.position);
 					// TODO proper UV and tangent
-					v.uv = { i / float(size - 1), j / float(size - 1) };
+					v.uv = { i / float(subdivision - 1), j / float(subdivision - 1) };
 					v.normal = v.position;
 					v.tangent = normalize(Vec3(0, v.position.z, v.position.y));
+					v.position *= size;
 				}
 			}
-			for (u32 j = 0; j < size - 1; ++j) {
-				for (u32 i = 0; i < size - 1; ++i) {
-					result->indices.push(offset + i + j * size);
-					result->indices.push(offset + i + 1 + j * size);
-					result->indices.push(offset + i + (j + 1) * size);
+			for (u32 j = 0; j < subdivision - 1; ++j) {
+				for (u32 i = 0; i < subdivision - 1; ++i) {
+					result->indices.push(offset + i + j * subdivision);
+					result->indices.push(offset + i + 1 + j * subdivision);
+					result->indices.push(offset + i + (j + 1) * subdivision);
 
-					result->indices.push(offset + i + (j + 1) * size);
-					result->indices.push(offset + i + 1 + j * size);
-					result->indices.push(offset + i + 1 + (j + 1) * size);
+					result->indices.push(offset + i + (j + 1) * subdivision);
+					result->indices.push(offset + i + 1 + j * subdivision);
+					result->indices.push(offset + i + 1 + (j + 1) * subdivision);
 				}
 			}
 		};
@@ -1000,10 +1178,13 @@ struct SphereNode : Node {
 	bool gui() override {
 		ImGuiEx::NodeTitle("Sphere");
 		outputSlot();
-		return ImGui::DragInt("Size", (i32*)&size);
+		bool res = ImGui::DragInt("Subdivision", (i32*)&subdivision);
+		ImGui::DragFloat("Size", &size) || res;
+		return res;
 	}
 
-	u32 size = 10;
+	u32 subdivision = 10;
+	float size = 1.f;
 };
 
 struct CubeNode : Node {
@@ -1081,11 +1262,11 @@ struct MergeNode : Node {
 	NodeType getType() override { return NodeType::MERGE; }
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input input0 = getInput(*m_resource, m_id, 0);
+		const Input input0 = getInput(0);
 		if (!input0) return false;
 		if (!input0.getGeometry(result)) return false;
 
-		const Input input1 = getInput(*m_resource, m_id, 1);
+		const Input input1 = getInput(1);
 		if (input1) {
 			Geometry tmp(*m_allocator);
 			if (!input1.getGeometry(&tmp)) return false;
@@ -1133,7 +1314,7 @@ struct TransformNode : Node {
 	}
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input input = getInput(*m_resource, m_id, 0);
+		const Input input = getInput(0);
 		if (!input) return false;
 		if (!input.getGeometry(result)) return false;
 
@@ -1215,25 +1396,71 @@ struct DistributePointsOnFacesNode : Node {
 	NodeType getType() override { return NodeType::DISTRIBUTE_POINT_ON_FACES; }
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		// TODO
-		return false;
+		const Input input = getInput(0);
+		if (!input) return false;
+		Geometry geom(*m_allocator);
+		if (!input.getGeometry(&geom)) return false;
+		if (geom.type != gpu::PrimitiveType::TRIANGLES) return false;
+
+		float total_area = 0;
+		for (u32 i = 0; i < (u32)geom.indices.size(); i += 3) {
+			const u32 idx0 = geom.indices[i];
+			const u32 idx1 = geom.indices[i + 1];
+			const u32 idx2 = geom.indices[i + 2];
+			const Vec3 v0 = geom.vertices[idx1].position - geom.vertices[idx0].position;
+			const Vec3 v1 = geom.vertices[idx2].position - geom.vertices[idx0].position;
+			total_area += length(cross(v0, v1));
+		}
+
+		result->vertices.reserve(u32(density * total_area));
+		u32 N = u32(density * total_area);
+		for (u32 i = 0; i < N; ++i) {
+			float r = randFloat() * total_area;
+			// TODO indices (triangles), not vertices
+			for (u32 i = 0, c = geom.indices.size(); i < c; i += 3) {
+				const u32 idx0 = geom.indices[i];
+				const u32 idx1 = geom.indices[i + 1];
+				const u32 idx2 = geom.indices[i + 2];
+				const Vec3 v0 = geom.vertices[idx1].position - geom.vertices[idx0].position;
+				const Vec3 v1 = geom.vertices[idx2].position - geom.vertices[idx0].position;
+				const float area = length(cross(v0, v1));
+				r -= area;
+				if (r < 0) {
+					Vec2 uv(randFloat(), randFloat());
+					if (uv.x + uv.y > 1) {
+						uv.x = 1 - uv.x;
+						uv.y = 1 - uv.y;
+					}
+					Geometry::Vertex& v = result->vertices.emplace();
+					v.position = geom.vertices[idx0].position + uv.x * v0 + uv.y * v1;
+					v.normal = normalize(cross(v0, v1));
+					v.tangent = v0;
+					break;
+				}
+			}
+		}
+
+		result->type = gpu::PrimitiveType::POINTS;
+		return true;
 	}
 
 	bool gui() override {
 		ImGuiEx::NodeTitle("Distribute points on faces");
 		inputSlot();
-		ImGui::TextUnformatted(" ");
+		ImGui::DragFloat("Density", &density);
 		ImGui::SameLine();
 		outputSlot();
 		return false;
 	}
+
+	float density = 1.f;
 };
 
 struct OutputGeometryNode : Node {
 	NodeType getType() override { return NodeType::OUTPUT; }
 	
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input input = getInput(*m_resource, m_id, 0);
+		const Input input = getInput(0);
 		if (input) return input.getGeometry(result);
 		return false;
 	}
@@ -1288,6 +1515,13 @@ void ProceduralGeomPlugin::apply() {
 	}
 	scene->setProceduralGeometry(selected[0], vertices, decl, indices, gpu::DataType::U32);
 	scene->setProceduralGeometryMaterial(selected[0], Path(m_resource->m_material));
+
+	for (const UniquePtr<Node>& node : m_resource->m_nodes) {
+		if (node->getType() == NodeType::INSTANTIATE_PREFAB) {
+			InstantiatePrefabNode* n = (InstantiatePrefabNode*)node.get();
+			n->instantiate(selected[0]);
+		}
+	}
 }
 
 Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
@@ -1295,7 +1529,10 @@ Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 	switch (type) {
 		case NodeType::CIRCLE: node = UniquePtr<CircleNode>::create(m_allocator); break;
 		case NodeType::LINE: node = UniquePtr<LineNode>::create(m_allocator); break;
+		case NodeType::POINT: node = UniquePtr<PointNode>::create(m_allocator); break;
 		case NodeType::SPLINE: node = UniquePtr<SplineNode>::create(m_allocator); break;
+		case NodeType::INSTANTIATE_PREFAB: node = UniquePtr<InstantiatePrefabNode>::create(m_allocator); break;
+		case NodeType::PLACE_INSTANCES_AT_POINTS: node = UniquePtr<PlaceInstancesAtPoints>::create(m_allocator); break;
 		case NodeType::CYLINDER: node = UniquePtr<CylinderNode>::create(m_allocator); break;
 		case NodeType::CONE: node = UniquePtr<ConeNode>::create(m_allocator); break;
 		case NodeType::SPHERE: node = UniquePtr<SphereNode>::create(m_allocator); break;
