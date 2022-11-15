@@ -27,13 +27,14 @@
 
 namespace Lumix {
 
-struct ProceduralGeomPlugin;
+struct ProceduralGeomGeneratorPlugin;
 
 namespace {
 
 enum { OUTPUT_FLAG = 1 << 31 };
 
 static const ComponentType SPLINE_TYPE = reflection::getComponentType("spline");
+static const ComponentType PROCEDURAL_GEOM_TYPE = reflection::getComponentType("procedural_geom");
 
 enum class NodeType : u32 { 
 	OUTPUT,
@@ -231,36 +232,36 @@ struct EditorResource {
 
 static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
 
-struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, UniquePtr<Node>, Link> {
-	ProceduralGeomPlugin(StudioApp& app)
+struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, UniquePtr<Node>, Link> {
+	ProceduralGeomGeneratorPlugin(StudioApp& app)
 		: m_app(app)
 		, m_allocator(app.getAllocator())
 		, m_recent_paths(app.getAllocator())
 		, NodeEditor(app.getAllocator())
 	{
 		m_delete_action.init(ICON_FA_TRASH "Delete", "Procedural geometry editor delete", "proc_geom_editor_delete", ICON_FA_TRASH, os::Keycode::DEL, Action::Modifiers::NONE, true);
-		m_delete_action.func.bind<&ProceduralGeomPlugin::deleteSelectedNodes>(this);
+		m_delete_action.func.bind<&ProceduralGeomGeneratorPlugin::deleteSelectedNodes>(this);
 		m_delete_action.plugin = this;
 
 		m_undo_action.init(ICON_FA_UNDO "Undo", "Procedural geometry editor undo", "proc_geom_editor_undo", ICON_FA_UNDO, os::Keycode::Z, Action::Modifiers::CTRL, true);
-		m_undo_action.func.bind<&ProceduralGeomPlugin::undo>((SimpleUndoRedo*)this);
+		m_undo_action.func.bind<&ProceduralGeomGeneratorPlugin::undo>((SimpleUndoRedo*)this);
 		m_undo_action.plugin = this;
 
 		m_redo_action.init(ICON_FA_REDO "Redo", "Procedural geometry editor redo", "proc_geom_editor_redo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
-		m_redo_action.func.bind<&ProceduralGeomPlugin::redo>((SimpleUndoRedo*)this);
+		m_redo_action.func.bind<&ProceduralGeomGeneratorPlugin::redo>((SimpleUndoRedo*)this);
 		m_redo_action.plugin = this;
 
 		m_apply_action.init("Apply", "Procedural geometry editor apply", "proc_geom_editor_apply", ICON_FA_CHECK, os::Keycode::E, Action::Modifiers::CTRL, true);
-		m_apply_action.func.bind<&ProceduralGeomPlugin::apply>(this);
+		m_apply_action.func.bind<&ProceduralGeomGeneratorPlugin::apply>(this);
 		m_apply_action.plugin = this;
 
 		m_save_action.init(ICON_FA_SAVE "Save", "Procedural geometry editor save", "proc_geom_editor_save", ICON_FA_SAVE, os::Keycode::S, Action::Modifiers::CTRL, true);
-		m_save_action.func.bind<&ProceduralGeomPlugin::save>(this);
+		m_save_action.func.bind<&ProceduralGeomGeneratorPlugin::save>(this);
 		m_save_action.plugin = this;
 
 		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", true);
-		m_toggle_ui.func.bind<&ProceduralGeomPlugin::toggleOpen>(this);
-		m_toggle_ui.is_selected.bind<&ProceduralGeomPlugin::isOpen>(this);
+		m_toggle_ui.func.bind<&ProceduralGeomGeneratorPlugin::toggleOpen>(this);
+		m_toggle_ui.is_selected.bind<&ProceduralGeomGeneratorPlugin::isOpen>(this);
 		
 		app.addWindowAction(&m_toggle_ui);
 		app.addAction(&m_undo_action);
@@ -272,7 +273,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		newGraph();
 	}
 
-	~ProceduralGeomPlugin(){
+	~ProceduralGeomGeneratorPlugin(){
 		m_app.removeAction(&m_toggle_ui);
 		m_app.removeAction(&m_undo_action);
 		m_app.removeAction(&m_redo_action);
@@ -281,7 +282,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		m_app.removeAction(&m_save_action);
 	}
 	
-	void onCanvasClicked(ImVec2 pos) override {
+	void onCanvasClicked(ImVec2 pos, i32 hovered_link) override {
 		static const struct {
 			char key;
 			NodeType type;
@@ -298,7 +299,9 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 		for (const auto& t : types) {
 			if (os::isKeyDown((os::Keycode)t.key)) {
 				const ImVec2 mp = ImGui::GetMousePos() - m_offset;
-				addNode(t.type, mp, true);
+				addNode(t.type, mp, false);
+				if (hovered_link >= 0) splitLink(*m_resource, hovered_link, m_resource->m_nodes.size() - 1);
+				pushUndo(NO_MERGE_UNDO);
 				break;
 			}
 		}
@@ -508,7 +511,7 @@ struct ProceduralGeomPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, U
 	void apply();
 	Node* addNode(NodeType type, ImVec2 pos, bool save_undo);
 
-	const char* getName() const override { return "procedural_geom"; }
+	const char* getName() const override { return "procedural_geom_generator"; }
 	
 	IAllocator& m_allocator;
 	StudioApp& m_app;
@@ -787,6 +790,15 @@ struct InstantiatePrefabNode : Node {
 			m_prefab = rm.load<PrefabResource>(Path(path));
 			return true;
 		}
+		if (ImGui::Button("Instantiate")) {
+			WorldEditor& editor = m_resource->m_app.getWorldEditor();
+			const Array<EntityRef>& selected = editor.getSelectedEntities();
+			Universe* universe = editor.getUniverse();
+			while (EntityPtr child = universe->getFirstChild(selected[0])) {
+				universe->destroyEntity(*child);
+			}
+			if (selected.size() == 1) instantiate(selected[0]);
+		}
 		return false;
 	}
 	
@@ -798,6 +810,7 @@ struct InstantiatePrefabNode : Node {
 
 		WorldEditor& editor = m_resource->m_app.getWorldEditor();
 		Universe& universe = *editor.getUniverse();
+		
 		const Transform& transform = universe.getTransform(parent);
 		Geometry points(*m_allocator);
 		if (!input.getGeometry(&points)) return;
@@ -1563,19 +1576,26 @@ struct OutputGeometryNode : Node {
 	bool gui() override {
 		ImGuiEx::NodeTitle("Output geometry");
 		inputSlot();
-		ImGui::DragInt("User channels", (i32*)&user_channels_count);
-		return false;
+		return ImGui::SliderInt("User channels", (i32*)&user_channels_count, 0, 4);
 	}
 
 	u32 user_channels_count = 0;
 };
 
-void ProceduralGeomPlugin::apply() {	
+void ProceduralGeomGeneratorPlugin::apply() {	
 	const Array<EntityRef>& selected = m_app.getWorldEditor().getSelectedEntities();
 	if (selected.size() != 1) return;
-
+	
+	Universe* universe = m_app.getWorldEditor().getUniverse();
+	bool children_removed = false;
 	for (const UniquePtr<Node>& node : m_resource->m_nodes) {
 		if (node->getType() == NodeType::INSTANTIATE_PREFAB) {
+			if (!children_removed) {
+				while (EntityPtr child = universe->getFirstChild(selected[0])) {
+					universe->destroyEntity(*child);
+				}
+				children_removed = true;
+			}
 			InstantiatePrefabNode* n = (InstantiatePrefabNode*)node.get();
 			n->instantiate(selected[0]);
 		}
@@ -1585,9 +1605,9 @@ void ProceduralGeomPlugin::apply() {
 	Geometry geom(m_allocator);
 	if (!output->getGeometry(0, &geom)) return;
 
-	Universe* universe = m_app.getWorldEditor().getUniverse();
 	RenderScene* scene = (RenderScene*)universe->getScene("renderer");
-	if (!scene->hasProceduralGeometry(selected[0])) scene->createProceduralGeometry(selected[0]);
+	
+	if (!universe->hasComponent(selected[0], PROCEDURAL_GEOM_TYPE)) universe->createComponent(PROCEDURAL_GEOM_TYPE, selected[0]);
 
 	Span<const u8> vertices((const u8*)geom.vertices.begin(), (u32)geom.vertices.byte_size());
 	Span<const u8> indices((const u8*)geom.indices.begin(), (u32)geom.indices.byte_size());
@@ -1641,7 +1661,7 @@ Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 	return m_nodes.back().get();
 }
 
-Node* ProceduralGeomPlugin::addNode(NodeType type, ImVec2 pos, bool save_undo) {
+Node* ProceduralGeomGeneratorPlugin::addNode(NodeType type, ImVec2 pos, bool save_undo) {
 	Node* n = m_resource->createNode(type, pos);
 	n->m_pos = pos;
 	if (save_undo) pushUndo(NO_MERGE_UNDO);
@@ -1649,7 +1669,7 @@ Node* ProceduralGeomPlugin::addNode(NodeType type, ImVec2 pos, bool save_undo) {
 }
 
 LUMIX_STUDIO_ENTRY(procedural_geom) {
-	auto* plugin = LUMIX_NEW(app.getAllocator(), ProceduralGeomPlugin)(app);
+	auto* plugin = LUMIX_NEW(app.getAllocator(), ProceduralGeomGeneratorPlugin)(app);
 	app.addPlugin(*plugin);
 	return nullptr;
 }
