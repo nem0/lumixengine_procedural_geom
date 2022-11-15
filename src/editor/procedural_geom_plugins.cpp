@@ -727,7 +727,7 @@ struct ModelNode : Node {
 		if (!m_model) return false;
 		if (!m_model->isReady()) return false;
 
-		for (u32 i = 0, c = m_model->getMeshCount(); i < c; ++i) {
+		for (u32 i = 0, ci= m_model->getMeshCount(); i < ci; ++i) {
 			const Mesh& mesh = m_model->getMesh(i);
 			
 			const u32 indices_offset = result->vertices.size();
@@ -1047,17 +1047,19 @@ struct CylinderNode : Node {
 	bool getGeometry(u16 output_idx, Geometry* result) override {
 		result->vertices.reserve(2 * subdivision + 4);
 
-		Geometry::Vertex& v = result->vertices.emplace();
-		v.position = Vec3(0, 0, 0.5f * height);
-		v.normal = Vec3(0, 0, 1);
-		v.tangent = Vec3(1, 0, 0);
-		v.uv = Vec2(0, 0);
-
-		Geometry::Vertex& v2 = result->vertices.emplace();
-		v2.position = Vec3(0, 0, -0.5f * height);
-		v2.normal = Vec3(0, 0, -1);
-		v2.tangent = Vec3(-1, 0, 0);
-		v2.uv = Vec2(0, 0);
+		{
+			Geometry::Vertex& v1 = result->vertices.emplace();
+			v1.position = Vec3(0, 0, 0.5f * height);
+			v1.normal = Vec3(0, 0, 1);
+			v1.tangent = Vec3(1, 0, 0);
+			v1.uv = Vec2(0, 0);
+	
+			Geometry::Vertex& v2 = result->vertices.emplace();
+			v2.position = Vec3(0, 0, -0.5f * height);
+			v2.normal = Vec3(0, 0, -1);
+			v2.tangent = Vec3(-1, 0, 0);
+			v2.uv = Vec2(0, 0);
+		}
 
 		for (u32 i = 0; i < subdivision; ++i) {
 			const float a = i / float(subdivision) * PI * 2;
@@ -1514,9 +1516,8 @@ struct DistributePointsOnFacesNode : Node {
 
 		result->vertices.reserve(u32(density * total_area));
 		u32 N = u32(density * total_area);
-		for (u32 i = 0; i < N; ++i) {
+		for (u32 j = 0; j < N; ++j) {
 			float r = randFloat() * total_area;
-			// TODO indices (triangles), not vertices
 			for (u32 i = 0, c = geom.indices.size(); i < c; i += 3) {
 				const u32 idx0 = geom.indices[i];
 				const u32 idx1 = geom.indices[i + 1];
