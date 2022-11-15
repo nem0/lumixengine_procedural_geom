@@ -1517,7 +1517,7 @@ struct DistributePointsOnFacesNode : Node {
 		result->vertices.reserve(u32(density * total_area));
 		u32 N = u32(density * total_area);
 		for (u32 j = 0; j < N; ++j) {
-			float r = randFloat() * total_area;
+			float r = halton(j, 2) * total_area;
 			for (u32 i = 0, c = geom.indices.size(); i < c; i += 3) {
 				const u32 idx0 = geom.indices[i];
 				const u32 idx1 = geom.indices[i + 1];
