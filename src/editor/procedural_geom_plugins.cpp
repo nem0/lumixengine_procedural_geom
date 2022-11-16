@@ -31,6 +31,7 @@ struct ProceduralGeomGeneratorPlugin;
 
 namespace {
 
+using Link = NodeEditorLink;
 enum { OUTPUT_FLAG = 1 << 31 };
 
 static const ComponentType SPLINE_TYPE = reflection::getComponentType("spline");
@@ -82,22 +83,22 @@ struct Input {
 	operator bool() const { return node != nullptr; }
 };
 
-struct Node {
+struct Node : NodeEditorNode {
 	virtual bool gui() = 0;
 
-	virtual NodeType getType() = 0;
+	virtual NodeType getType() const = 0;
 
 	virtual bool getGeometry(u16 output_idx, Geometry* result) = 0;
-	virtual void serialize(OutputMemoryStream& blob) {}
+	virtual void serialize(OutputMemoryStream& blob) const {}
 	virtual void deserialize(InputMemoryStream& blob) {}
 
 	// TODO
-	bool hasInputPins() const { return false; }
-	bool hasOutputPins() const { return false; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return false; }
 
 	Input getInput(u16 input) const;
 
-	bool nodeGUI() {
+	bool nodeGUI() override {
 		ImGuiEx::BeginNode(m_id, m_pos, &m_selected);
 		m_input_counter = 0;
 		m_output_counter = 0;
@@ -118,23 +119,9 @@ struct Node {
 
 	struct EditorResource* m_resource;
 	IAllocator* m_allocator;
-	u16 m_id;
 	bool m_selected = false;
-	ImVec2 m_pos = ImVec2(0, 0);
 	u16 m_input_counter = 0;
 	u16 m_output_counter = 0;
-};
-
-struct Link {
-	u32 from;
-	u32 to;
-	u32 color = 0xffFFffFF;
-
-	u16 getToNode() const { return u16(to); }
-	u16 getFromNode() const { return u16(from); }
-
-	u16 getToPin() const { return u16(to >> 16); }
-	u16 getFromPin() const { return u16(from >> 16); }
 };
 
 struct Header {
@@ -159,9 +146,13 @@ struct EditorResource {
 		, m_links(allocator)
 	{}
 
+	~EditorResource() {
+		for (Node* node : m_nodes) LUMIX_DELETE(m_allocator, node);
+	}
+
 	void deleteSelectedNodes() {
 		for (i32 i = m_nodes.size() - 1; i >= 0; --i) {
-			Node* node = m_nodes[i].get();
+			Node* node = m_nodes[i];
 			if (node->m_selected) {
 				for (i32 j = m_links.size() - 1; j >= 0; --j) {
 					if (m_links[j].getFromNode() == node->m_id || m_links[j].getToNode() == node->m_id) {
@@ -169,6 +160,7 @@ struct EditorResource {
 					}
 				}
 
+				LUMIX_DELETE(m_allocator, node);
 				m_nodes.swapAndPop(i);
 			}
 		}
@@ -180,7 +172,7 @@ struct EditorResource {
 		blob.write(m_node_id_genereator);
 		blob.writeString(m_material.c_str());
 		blob.write(m_nodes.size());
-		for (UniquePtr<Node>& node : m_nodes) {
+		for (const Node* node : m_nodes) {
 			blob.write(node->getType());
 			blob.write(node->m_id);
 			blob.write(node->m_pos);
@@ -222,7 +214,7 @@ struct EditorResource {
 
 	IAllocator& m_allocator;
 	StudioApp& m_app;
-	Array<UniquePtr<Node>> m_nodes;
+	Array<Node*> m_nodes;
 	Array<Link> m_links;
 	Path m_material;
 	u16 m_node_id_genereator = 1;
@@ -232,7 +224,7 @@ struct EditorResource {
 
 static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
 
-struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor<EditorResource, UniquePtr<Node>, Link> {
+struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	ProceduralGeomGeneratorPlugin(StudioApp& app)
 		: m_app(app)
 		, m_allocator(app.getAllocator())
@@ -299,8 +291,8 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor<EditorRe
 		for (const auto& t : types) {
 			if (os::isKeyDown((os::Keycode)t.key)) {
 				const ImVec2 mp = ImGui::GetMousePos() - m_offset;
-				addNode(t.type, mp, false);
-				if (hovered_link >= 0) splitLink(*m_resource, hovered_link, m_resource->m_nodes.size() - 1);
+				Node* node = addNode(t.type, mp, false);
+				if (hovered_link >= 0) splitLink(m_resource->m_nodes.back(), m_resource->m_links, hovered_link);
 				pushUndo(NO_MERGE_UNDO);
 				break;
 			}
@@ -498,7 +490,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor<EditorRe
 			m_app.getAssetBrowser().resourceInput("material", span, Material::TYPE);
 			m_resource->m_material.endUpdate();	
 
-			nodeEditorGUI(*m_resource);
+			nodeEditorGUI(m_resource->m_nodes, m_resource->m_links);
 		}
 		ImGui::End();
 	}
@@ -532,8 +524,8 @@ template <typename F>
 static void	forEachInput(const EditorResource& resource, int node_id, const F& f) {
 	for (const Link& link : resource.m_links) {
 		if (toNodeId(link.to) == node_id) {
-			const int iter = resource.m_nodes.find([&](const UniquePtr<Node>& node) { return node->m_id == toNodeId(link.from); }); 
-			Node* from = resource.m_nodes[iter].get();
+			const int iter = resource.m_nodes.find([&](const Node* node) { return node->m_id == toNodeId(link.from); }); 
+			Node* from = resource.m_nodes[iter];
 			const u16 from_attr = toAttrIdx(link.from);
 			const u16 to_attr = toAttrIdx(link.to);
 			f(from, from_attr, to_attr, u32(&link - resource.m_links.begin()));
@@ -555,7 +547,7 @@ Input Node::getInput(u16 input_idx) const {
 }
 
 struct CircleNode : Node {
-	NodeType getType() override { return NodeType::CIRCLE; }
+	NodeType getType() const override { return NodeType::CIRCLE; }
 
 	bool gui() override {
 		ImGuiEx::NodeTitle("Circle");
@@ -579,7 +571,7 @@ struct CircleNode : Node {
 		return true;
 	}
 	
-	void serialize(OutputMemoryStream& blob) override {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(radius);
 		blob.write(subdivision);
 	}
@@ -594,7 +586,7 @@ struct CircleNode : Node {
 };
 
 struct LineNode : Node {
-	NodeType getType() override { return NodeType::LINE; }
+	NodeType getType() const override { return NodeType::LINE; }
 
 	bool gui() override {
 		ImGuiEx::NodeTitle("Line");
@@ -617,7 +609,7 @@ struct LineNode : Node {
 		return true;
 	}
 
-	void serialize(OutputMemoryStream& blob) override {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(size);
 		blob.write(subdivision);
 	}
@@ -632,7 +624,7 @@ struct LineNode : Node {
 };
 
 struct PlaceInstancesAtPoints : Node {
-	NodeType getType() override { return NodeType::PLACE_INSTANCES_AT_POINTS; }
+	NodeType getType() const override { return NodeType::PLACE_INSTANCES_AT_POINTS; }
 
 	bool gui() override {
 		ImGuiEx::NodeTitle("Place instances at points");
@@ -692,9 +684,9 @@ struct ModelNode : Node {
 		if (m_model) m_model->decRefCount();
 	}
 
-	NodeType getType() override { return NodeType::MODEL; }
+	NodeType getType() const override { return NodeType::MODEL; }
 
-	void serialize(OutputMemoryStream& blob) override {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.writeString(m_model ? m_model->getPath().c_str() : "");
 	}
 
@@ -761,9 +753,9 @@ struct InstantiatePrefabNode : Node {
 		if (m_prefab) m_prefab->decRefCount();
 	}
 
-	NodeType getType() override { return NodeType::INSTANTIATE_PREFAB; }
+	NodeType getType() const override { return NodeType::INSTANTIATE_PREFAB; }
 
-	void serialize(OutputMemoryStream& blob) override {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.writeString(m_prefab ? m_prefab->getPath().c_str() : "");
 	}
 
@@ -802,7 +794,7 @@ struct InstantiatePrefabNode : Node {
 		return false;
 	}
 	
-	void instantiate(EntityRef parent) {
+	void instantiate(EntityRef parent) const {
 		if (!m_prefab || !m_prefab->isReady()) return;
 		
 		const Input input = getInput(0);
@@ -873,9 +865,9 @@ struct SplineIterator {
 };
 
 struct PointNode : Node {
-	NodeType getType() override { return NodeType::POINT; }
+	NodeType getType() const override { return NodeType::POINT; }
 
-	void serialize(OutputMemoryStream& blob) override {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(position);
 	}
 
@@ -906,7 +898,7 @@ struct PointNode : Node {
 };
 
 struct SplineNode : Node {
-	NodeType getType() override { return NodeType::SPLINE; }
+	NodeType getType() const override { return NodeType::SPLINE; }
 	
 	bool gui() override {
 		ImGuiEx::NodeTitle("Spline");
@@ -1015,7 +1007,7 @@ struct SplineNode : Node {
 		return true;
 	}
 
-	void serialize(OutputMemoryStream& blob) override {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(width);
 		blob.write(step);
 	}
@@ -1030,9 +1022,9 @@ struct SplineNode : Node {
 };
 
 struct CylinderNode : Node {
-	NodeType getType() override { return NodeType::CYLINDER; }
+	NodeType getType() const override { return NodeType::CYLINDER; }
 	
-	void serialize(OutputMemoryStream& blob) override {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(subdivision);
 		blob.write(radius);
 		blob.write(height);
@@ -1137,9 +1129,9 @@ struct CylinderNode : Node {
 };
 
 struct ConeNode : Node {
-	NodeType getType() override { return NodeType::CONE; }
+	NodeType getType() const override { return NodeType::CONE; }
 	
-	void serialize(OutputMemoryStream& blob) override {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(subdivision);
 		blob.write(base_size);
 		blob.write(height);
@@ -1220,8 +1212,9 @@ struct ConeNode : Node {
 };
 
 struct SphereNode : Node {
-	NodeType getType() override { return NodeType::SPHERE; }
-	void serialize(OutputMemoryStream& blob) override {
+	NodeType getType() const override { return NodeType::SPHERE; }
+	
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(size);
 		blob.write(subdivision);
 	}
@@ -1290,9 +1283,9 @@ struct SphereNode : Node {
 };
 
 struct CubeNode : Node {
-	NodeType getType() override { return NodeType::CUBE; }
+	NodeType getType() const override { return NodeType::CUBE; }
 
-	void serialize(OutputMemoryStream& blob) override {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(size);
 	}
 
@@ -1361,7 +1354,7 @@ struct CubeNode : Node {
 };
 
 struct MergeNode : Node {
-	NodeType getType() override { return NodeType::MERGE; }
+	NodeType getType() const override { return NodeType::MERGE; }
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
 		const Input input0 = getInput(0);
@@ -1401,15 +1394,15 @@ struct MergeNode : Node {
 };
 
 struct TransformNode : Node {
-	NodeType getType() override { return NodeType::TRANSFORM; }
+	NodeType getType() const override { return NodeType::TRANSFORM; }
 
-	void serialize(OutputMemoryStream& blob) {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(translation);
 		blob.write(euler);
 		blob.write(scale);
 	}
 	
-	void deserialize(InputMemoryStream& blob) {
+	void deserialize(InputMemoryStream& blob) override {
 		blob.read(translation);
 		blob.read(euler);
 		blob.read(scale);
@@ -1450,7 +1443,17 @@ struct TransformNode : Node {
 };
 
 struct GridNode : Node {
-	NodeType getType() override { return NodeType::GRID; }
+	NodeType getType() const override { return NodeType::GRID; }
+	
+	void serialize(OutputMemoryStream& blob) const override {
+		blob.write(m_cols);
+		blob.write(m_rows);
+	}
+	
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_cols);
+		blob.read(m_rows);
+	}
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
 		result->type = gpu::PrimitiveType::TRIANGLES;
@@ -1495,7 +1498,15 @@ struct GridNode : Node {
 };
 
 struct DistributePointsOnFacesNode : Node {
-	NodeType getType() override { return NodeType::DISTRIBUTE_POINT_ON_FACES; }
+	NodeType getType() const override { return NodeType::DISTRIBUTE_POINT_ON_FACES; }
+	
+	void serialize(OutputMemoryStream& blob) const override {
+		blob.write(density);
+	}
+	
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(density);
+	}
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
 		const Input input = getInput(0);
@@ -1558,7 +1569,7 @@ struct DistributePointsOnFacesNode : Node {
 };
 
 struct OutputGeometryNode : Node {
-	NodeType getType() override { return NodeType::OUTPUT; }
+	NodeType getType() const override { return NodeType::OUTPUT; }
 	
 	bool getGeometry(u16 output_idx, Geometry* result) override {
 		const Input input = getInput(0);
@@ -1566,7 +1577,7 @@ struct OutputGeometryNode : Node {
 		return false;
 	}
 
-	void serialize(OutputMemoryStream& blob) override {
+	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(user_channels_count);
 	}
 
@@ -1589,7 +1600,7 @@ void ProceduralGeomGeneratorPlugin::apply() {
 	
 	Universe* universe = m_app.getWorldEditor().getUniverse();
 	bool children_removed = false;
-	for (const UniquePtr<Node>& node : m_resource->m_nodes) {
+	for (const Node* node : m_resource->m_nodes) {
 		if (node->getType() == NodeType::INSTANTIATE_PREFAB) {
 			if (!children_removed) {
 				while (EntityPtr child = universe->getFirstChild(selected[0])) {
@@ -1597,12 +1608,12 @@ void ProceduralGeomGeneratorPlugin::apply() {
 				}
 				children_removed = true;
 			}
-			InstantiatePrefabNode* n = (InstantiatePrefabNode*)node.get();
+			const InstantiatePrefabNode* n = (const InstantiatePrefabNode*)node;
 			n->instantiate(selected[0]);
 		}
 	}
 
-	OutputGeometryNode* output = (OutputGeometryNode*)m_resource->m_nodes[0].get();
+	OutputGeometryNode* output = (OutputGeometryNode*)m_resource->m_nodes[0];
 	Geometry geom(m_allocator);
 	if (!output->getGeometry(0, &geom)) return;
 
@@ -1634,32 +1645,32 @@ void ProceduralGeomGeneratorPlugin::apply() {
 }
 
 Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
-	UniquePtr<Node> node;
+	Node* node;
 	switch (type) {
-		case NodeType::CIRCLE: node = UniquePtr<CircleNode>::create(m_allocator); break;
-		case NodeType::LINE: node = UniquePtr<LineNode>::create(m_allocator); break;
-		case NodeType::POINT: node = UniquePtr<PointNode>::create(m_allocator); break;
-		case NodeType::SPLINE: node = UniquePtr<SplineNode>::create(m_allocator); break;
-		case NodeType::MODEL: node = UniquePtr<ModelNode>::create(m_allocator); break;
-		case NodeType::INSTANTIATE_PREFAB: node = UniquePtr<InstantiatePrefabNode>::create(m_allocator); break;
-		case NodeType::PLACE_INSTANCES_AT_POINTS: node = UniquePtr<PlaceInstancesAtPoints>::create(m_allocator); break;
-		case NodeType::CYLINDER: node = UniquePtr<CylinderNode>::create(m_allocator); break;
-		case NodeType::CONE: node = UniquePtr<ConeNode>::create(m_allocator); break;
-		case NodeType::SPHERE: node = UniquePtr<SphereNode>::create(m_allocator); break;
-		case NodeType::CUBE: node = UniquePtr<CubeNode>::create(m_allocator); break;
-		case NodeType::OUTPUT: node = UniquePtr<OutputGeometryNode>::create(m_allocator); break;
-		case NodeType::DISTRIBUTE_POINT_ON_FACES: node = UniquePtr<DistributePointsOnFacesNode>::create(m_allocator); break;
-		case NodeType::GRID: node = UniquePtr<GridNode>::create(m_allocator); break;
-		case NodeType::TRANSFORM: node = UniquePtr<TransformNode>::create(m_allocator); break;
-		case NodeType::MERGE: node = UniquePtr<MergeNode>::create(m_allocator); break;
+		case NodeType::CIRCLE: node = LUMIX_NEW(m_allocator, CircleNode); break;
+		case NodeType::LINE: node = LUMIX_NEW(m_allocator, LineNode); break;
+		case NodeType::POINT: node = LUMIX_NEW(m_allocator, PointNode); break;
+		case NodeType::SPLINE: node = LUMIX_NEW(m_allocator, SplineNode); break;
+		case NodeType::MODEL: node = LUMIX_NEW(m_allocator, ModelNode); break;
+		case NodeType::INSTANTIATE_PREFAB: node = LUMIX_NEW(m_allocator, InstantiatePrefabNode); break;
+		case NodeType::PLACE_INSTANCES_AT_POINTS: node = LUMIX_NEW(m_allocator, PlaceInstancesAtPoints); break;
+		case NodeType::CYLINDER: node = LUMIX_NEW(m_allocator, CylinderNode); break;
+		case NodeType::CONE: node = LUMIX_NEW(m_allocator, ConeNode); break;
+		case NodeType::SPHERE: node = LUMIX_NEW(m_allocator, SphereNode); break;
+		case NodeType::CUBE: node = LUMIX_NEW(m_allocator, CubeNode); break;
+		case NodeType::OUTPUT: node = LUMIX_NEW(m_allocator, OutputGeometryNode); break;
+		case NodeType::DISTRIBUTE_POINT_ON_FACES: node = LUMIX_NEW(m_allocator, DistributePointsOnFacesNode); break;
+		case NodeType::GRID: node = LUMIX_NEW(m_allocator, GridNode); break;
+		case NodeType::TRANSFORM: node = LUMIX_NEW(m_allocator, TransformNode); break;
+		case NodeType::MERGE: node = LUMIX_NEW(m_allocator, MergeNode); break;
 		default: ASSERT(false); return nullptr;
 	}
 	node->m_pos = pos;
 	node->m_resource = this;
 	node->m_allocator = &m_allocator;
 	node->m_id = ++m_node_id_genereator;
-	m_nodes.push(node.move());
-	return m_nodes.back().get();
+	m_nodes.push(node);
+	return node;
 }
 
 Node* ProceduralGeomGeneratorPlugin::addNode(NodeType type, ImVec2 pos, bool save_undo) {
