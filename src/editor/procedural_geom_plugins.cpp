@@ -342,7 +342,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	void toggleOpen() { m_is_open = !m_is_open; }
 	bool hasFocus() override { return m_has_focus; }
 
-	void load(const char* path) {
+	void open(const char* path) {
 		os::InputFile file;
 		if (!file.open(path)) {
 			logError("Failed to load ", path);
@@ -375,10 +375,10 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		m_recent_paths.push(static_cast<String&&>(p));
 	}
 
-	void load() {
+	void open() {
 		char path[LUMIX_MAX_PATH];
 		if (os::getOpenFilename(Span(path), "Procedural geometry\0*.pgm\0", "pgm")) {
-			load(path);
+			open(path);
 		}
 	}
 
@@ -468,7 +468,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 			if (ImGui::BeginMenuBar()) {
 				if (ImGui::BeginMenu("File")) {
 					if (ImGui::MenuItem("New")) newGraph();
-					if (ImGui::MenuItem("Load")) load();
+					if (ImGui::MenuItem("Open")) open();
 					menuItem(m_save_action, true);
 					if (ImGui::MenuItem("Save As")) {
 						if(getSavePath() && m_path.length() != 0) saveAs(m_path.c_str());
@@ -477,7 +477,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 					ImGui::MenuItem("Autoapply", nullptr, &m_autoapply);
 					if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
 						for (const String& path : m_recent_paths) {
-							if (ImGui::MenuItem(path.c_str())) load(path.c_str());
+							if (ImGui::MenuItem(path.c_str())) open(path.c_str());
 						}
 						ImGui::EndMenu();
 					}
