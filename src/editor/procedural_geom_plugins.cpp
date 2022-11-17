@@ -55,7 +55,8 @@ enum class NodeType : u32 {
 	POINT,
 	INSTANTIATE_PREFAB,
 	MODEL,
-	SPIRAL
+	SPIRAL,
+	SCALE
 };
 
 struct Geometry {
@@ -235,8 +236,9 @@ static const struct {
 	{ 0, "Model", NodeType::MODEL },
 	{ 'I', "Place instances at points", NodeType::PLACE_INSTANCES_AT_POINTS },
 	{ 'P', "Point", NodeType::POINT },
+	{ 0, "Scale", NodeType::SCALE },
 	{ 0, "Sphere", NodeType::SPHERE },
-	{ 0, "Spiral", NodeType::SPIRAL},
+	{ 'Q', "Spiral", NodeType::SPIRAL},
 	{ 'S', "Spline", NodeType::SPLINE },
 	{ 'T', "Transform", NodeType::TRANSFORM },
 };
@@ -1543,6 +1545,45 @@ struct TransformNode : Node {
 	Vec3 scale = Vec3(1);
 };
 
+struct ScaleNode : Node {
+	NodeType getType() const override { return NodeType::SCALE; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
+
+	void serialize(OutputMemoryStream& blob) const override {
+		blob.write(scale);
+	}
+	
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(scale);
+	}
+
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		if (!getInputGeometry(0, result)) return false;
+
+		// TODO transform normal and tangent
+		for (Geometry::Vertex& v : result->vertices) {
+			v.position = v.position * scale;
+		}
+
+		return true;
+	}
+
+	bool gui() override {
+		ImGuiEx::NodeTitle("Scale");
+		inputSlot();
+		ImGui::BeginGroup();
+		bool res = ImGui::DragFloat("X", &scale.x);
+		res = ImGui::DragFloat("Y", &scale.y) || res;
+		res = ImGui::DragFloat("Z", &scale.z) || res;
+		ImGui::EndGroup();
+		ImGui::SameLine();
+		outputSlot();
+		return res;
+	}
+
+	Vec3 scale = Vec3(1);
+};
 struct GridNode : Node {
 	NodeType getType() const override { return NodeType::GRID; }
 	bool hasInputPins() const override { return false; }
@@ -1765,6 +1806,7 @@ Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 		case NodeType::OUTPUT: node = LUMIX_NEW(m_allocator, OutputGeometryNode); break;
 		case NodeType::POINT: node = LUMIX_NEW(m_allocator, PointNode); break;
 		case NodeType::PLACE_INSTANCES_AT_POINTS: node = LUMIX_NEW(m_allocator, PlaceInstancesAtPoints); break;
+		case NodeType::SCALE: node = LUMIX_NEW(m_allocator, ScaleNode); break;
 		case NodeType::SPHERE: node = LUMIX_NEW(m_allocator, SphereNode); break;
 		case NodeType::SPLINE: node = LUMIX_NEW(m_allocator, SplineNode); break;
 		case NodeType::SPIRAL: node = LUMIX_NEW(m_allocator, SpiralNode); break;
