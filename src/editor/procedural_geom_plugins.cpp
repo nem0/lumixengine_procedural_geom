@@ -49,6 +49,7 @@ enum class NodeType : u32 {
 	CONE,
 	CYLINDER,
 	SPLINE,
+	EXTRUDE_ALONG,
 	LINE,
 	CIRCLE,
 	POINT,
@@ -85,18 +86,13 @@ struct Input {
 
 struct Node : NodeEditorNode {
 	virtual bool gui() = 0;
-
 	virtual NodeType getType() const = 0;
-
 	virtual bool getGeometry(u16 output_idx, Geometry* result) = 0;
 	virtual void serialize(OutputMemoryStream& blob) const {}
 	virtual void deserialize(InputMemoryStream& blob) {}
 
-	// TODO
-	bool hasInputPins() const override { return false; }
-	bool hasOutputPins() const override { return false; }
-
 	Input getInput(u16 input) const;
+	bool getInputGeometry(u16 input, Geometry* geometry) const;
 
 	bool nodeGUI() override {
 		ImGuiEx::BeginNode(m_id, m_pos, &m_selected);
@@ -280,18 +276,19 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 			NodeType type;
 		} types[] = {
 			{ 'C', NodeType::CUBE },
+			{ 'E', NodeType::EXTRUDE_ALONG },
 			{ 'G', NodeType::GRID },
 			{ 'I', NodeType::PLACE_INSTANCES_AT_POINTS },
 			{ 'L', NodeType::LINE },
 			{ 'M', NodeType::MERGE },
+			{ 'O', NodeType::CIRCLE },
 			{ 'P', NodeType::POINT },
 			{ 'S', NodeType::SPLINE },
 			{ 'T', NodeType::TRANSFORM },
 		};
 		for (const auto& t : types) {
 			if (os::isKeyDown((os::Keycode)t.key)) {
-				const ImVec2 mp = ImGui::GetMousePos() - m_offset;
-				Node* node = addNode(t.type, mp, false);
+				Node* node = addNode(t.type, pos, false);
 				if (hovered_link >= 0) splitLink(m_resource->m_nodes.back(), m_resource->m_links, hovered_link);
 				pushUndo(NO_MERGE_UNDO);
 				break;
@@ -309,6 +306,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		if (ImGui::MenuItem("Cube")) new_node = addNode(NodeType::CUBE, pos, true);
 		if (ImGui::MenuItem("Cylinder")) new_node = addNode(NodeType::CYLINDER, pos, true);
 		if (ImGui::MenuItem("Distribute points on faces")) new_node = addNode(NodeType::DISTRIBUTE_POINT_ON_FACES, pos, true);
+		if (ImGui::MenuItem("Extrude along")) new_node = addNode(NodeType::EXTRUDE_ALONG, pos, true);
 		if (ImGui::MenuItem("Grid")) new_node = addNode(NodeType::GRID, pos, true);
 		if (ImGui::MenuItem("Instantiate prefab")) new_node = addNode(NodeType::INSTANTIATE_PREFAB, pos, true);
 		if (ImGui::MenuItem("Line")) new_node = addNode(NodeType::LINE, pos, true);
@@ -375,7 +373,10 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	}
 
 	void load() {
-		ASSERT(false);
+		char path[LUMIX_MAX_PATH];
+		if (os::getOpenFilename(Span(path), "Procedural geometry\0*.pgm\0", "pgm")) {
+			load(path);
+		}
 	}
 
 	void clear() {
@@ -465,7 +466,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 				if (ImGui::BeginMenu("File")) {
 					if (ImGui::MenuItem("New")) newGraph();
 					if (ImGui::MenuItem("Load")) load();
-					menuItem(m_save_action, canApply());
+					menuItem(m_save_action, true);
 					if (ImGui::MenuItem("Save As")) {
 						if(getSavePath() && m_path.length() != 0) saveAs(m_path.c_str());
 					}
@@ -535,6 +536,13 @@ static void	forEachInput(const EditorResource& resource, int node_id, const F& f
 
 bool Input::getGeometry(Geometry* result) const { return node->getGeometry(output_idx, result); }
 
+
+bool Node::getInputGeometry(u16 input_idx, Geometry* geometry) const {
+	const Input input = getInput(input_idx);
+	if (!input) return false;
+	return input.getGeometry(geometry);
+}
+
 Input Node::getInput(u16 input_idx) const {
 	Input res;
 	forEachInput(*m_resource, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
@@ -548,6 +556,9 @@ Input Node::getInput(u16 input_idx) const {
 
 struct CircleNode : Node {
 	NodeType getType() const override { return NodeType::CIRCLE; }
+
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
 
 	bool gui() override {
 		ImGuiEx::NodeTitle("Circle");
@@ -588,6 +599,9 @@ struct CircleNode : Node {
 struct LineNode : Node {
 	NodeType getType() const override { return NodeType::LINE; }
 
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+
 	bool gui() override {
 		ImGuiEx::NodeTitle("Line");
 		outputSlot();
@@ -625,6 +639,8 @@ struct LineNode : Node {
 
 struct PlaceInstancesAtPoints : Node {
 	NodeType getType() const override { return NodeType::PLACE_INSTANCES_AT_POINTS; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
 
 	bool gui() override {
 		ImGuiEx::NodeTitle("Place instances at points");
@@ -638,16 +654,11 @@ struct PlaceInstancesAtPoints : Node {
 	}
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input points_input = getInput(0);
-		if (!points_input) return false;
-		const Input instance_inputs = getInput(1);
-		if (!instance_inputs) return false;
-
 		Geometry points(*m_allocator);
 		Geometry instance(*m_allocator);
-		if (!points_input.getGeometry(&points)) return false;
-		if (!instance_inputs.getGeometry(&instance)) return false;
 
+		if (!getInputGeometry(0, &points)) return false;
+		if (!getInputGeometry(1, &instance)) return false;
 		if (instance.type != gpu::PrimitiveType::TRIANGLES) return false;
 
 		result->vertices.reserve(points.vertices.size() * instance.vertices.size());
@@ -685,6 +696,9 @@ struct ModelNode : Node {
 	}
 
 	NodeType getType() const override { return NodeType::MODEL; }
+
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
 
 	void serialize(OutputMemoryStream& blob) const override {
 		blob.writeString(m_model ? m_model->getPath().c_str() : "");
@@ -754,6 +768,9 @@ struct InstantiatePrefabNode : Node {
 	}
 
 	NodeType getType() const override { return NodeType::INSTANTIATE_PREFAB; }
+
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return false; }
 
 	void serialize(OutputMemoryStream& blob) const override {
 		blob.writeString(m_prefab ? m_prefab->getPath().c_str() : "");
@@ -867,6 +884,9 @@ struct SplineIterator {
 struct PointNode : Node {
 	NodeType getType() const override { return NodeType::POINT; }
 
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+
 	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(position);
 	}
@@ -899,12 +919,12 @@ struct PointNode : Node {
 
 struct SplineNode : Node {
 	NodeType getType() const override { return NodeType::SPLINE; }
+
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
 	
 	bool gui() override {
 		ImGuiEx::NodeTitle("Spline");
-		inputSlot();
-		ImGui::TextUnformatted("Profile");
-		ImGui::SameLine();
 		outputSlot();
 		return ImGui::DragFloat("Step", &step);
 	}
@@ -921,89 +941,23 @@ struct SplineNode : Node {
 		const Spline& spline = core_scene->getSpline(selected[0]);
 		if (spline.points.empty()) return false;
 
-		const Input profile_input = getInput(0);
-		if (!profile_input) return false;
-
-		Geometry profile(m_resource->m_allocator);
-		if (!profile_input.getGeometry(&profile)) return false;
 
 		SplineIterator iterator(spline.points);
-		if (profile.type == gpu::PrimitiveType::POINTS) {
-			float d = 0;
-			result->vertices.reserve(512);
-			Vec3 prev_p = spline.points[0];
-			while (!iterator.isEnd()) {
-				const Vec3 p = iterator.getPosition();
-				const Vec3 dir = iterator.getDir();
-				const Vec3 normal = iterator.getNormal();
-				const Vec3 side = normalize(cross(dir, normal));
-				
-				for (const Geometry::Vertex& profile_v : profile.vertices) {
-					Geometry::Vertex& v = result->vertices.emplace();
-					const Vec3& profile_p = profile_v.position;
-					v.position = p + profile_p.x * side + profile_p.y * normal;
-					v.normal = iterator.getNormal();
-					v.tangent = normalize(cross(dir, Vec3(0, 1, 0)));
-					v.uv = Vec2(0, d);
-				}
-				iterator.move(step);
-				d += length(p - prev_p);
-				prev_p = p;
-			}
-			result->type = gpu::PrimitiveType::POINTS;
-			return true;
-		}
-
-		if (profile.type != gpu::PrimitiveType::LINES) return false;
-
-		result->vertices.reserve(16 * 1024);
-
-		const Transform spline_tr = universe.getTransform(selected[0]);
-		const Transform spline_tr_inv = spline_tr.inverted();
-
 		float d = 0;
-		u32 rows = 0;
+		result->vertices.reserve(512);
 		Vec3 prev_p = spline.points[0];
 		while (!iterator.isEnd()) {
-			++rows;
-			const Vec3 p = iterator.getPosition();
-
 			const Vec3 dir = normalize(iterator.getDir());
-			const Vec3 up = iterator.getNormal();
-			const Vec3 side = normalize(cross(dir, up)) * width;
-			d += length(p - prev_p);
-
-			const u32 w = profile.vertices.size();
-
-			for (u32 i = 0; i < w; ++i) {
-				Geometry::Vertex& v = result->vertices.emplace();
-				v.position = p + side * profile.vertices[i].position.x + up * profile.vertices[i].position.y;
-				v.uv = profile.vertices[i].uv;
-				v.uv.y = d;
-				v.normal = profile.vertices[i].normal;
-				v.normal = side * v.normal.x + up * v.normal.y + dir * v.normal.z;
-				v.tangent = profile.vertices[i].tangent;
-				v.tangent = side * v.tangent.x + up * v.tangent.y + dir * v.tangent.z;
-			}
-
-			if (rows > 1) {
-				const u32 offset = result->vertices.size() - 2 * w;
-				for (u32 i = 0; i < w - 1; ++i) {
-					result->indices.push(offset + i);
-					result->indices.push(offset + i + w);
-					result->indices.push(offset + i + 1);
-
-					result->indices.push(offset + i + w + 1);
-					result->indices.push(offset + i + 1);
-					result->indices.push(offset + i + w);
-				}
-			}
-
+			Geometry::Vertex& v = result->vertices.emplace();
+			v.position = iterator.getPosition();
+			v.normal = iterator.getNormal();
+			v.tangent = dir;
+			v.uv = Vec2(0, d);
 			iterator.move(step);
-			prev_p = p;
+			d += length(v.position - prev_p);
+			prev_p = v.position;
 		}
-
- 		result->type = gpu::PrimitiveType::TRIANGLES;
+		result->type = gpu::PrimitiveType::POINTS;
 		return true;
 	}
 
@@ -1021,8 +975,88 @@ struct SplineNode : Node {
 	float step = 0.1f;
 };
 
+struct ExtrudeAlongNode : Node {
+	NodeType getType() const override { return NodeType::EXTRUDE_ALONG; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
+
+	bool gui() override {
+		ImGuiEx::NodeTitle("Extrude along");
+		ImGui::BeginGroup();
+		inputSlot(); ImGui::TextUnformatted("Profile");
+		inputSlot(); ImGui::TextUnformatted("Path");
+		ImGui::EndGroup();
+		ImGui::SameLine();
+		outputSlot();
+		return false;
+	}
+
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		Geometry profile(*m_allocator);
+		Geometry path(*m_allocator);
+
+		if (!getInputGeometry(0, &profile)) return false;
+		if (!getInputGeometry(1, &path)) return false;
+		if (path.type != gpu::PrimitiveType::LINES && path.type != gpu::PrimitiveType::POINTS) return false;
+		
+		switch (profile.type) {
+			case gpu::PrimitiveType::POINTS:
+			case gpu::PrimitiveType::LINES: {
+				result->vertices.reserve(path.vertices.size() * profile.vertices.size());
+				
+				float d = 0;
+				u32 rows = 0;
+				Vec3 prev_p = path.vertices[0].position;
+				
+				for (Geometry::Vertex& path_v : path.vertices) {
+					++rows;
+					const Vec3 p = path_v.position;
+		
+					const Vec3 up = path_v.normal;
+					const Vec3 dir = path_v.tangent;
+					const Vec3 side = normalize(cross(up, dir));
+					d += length(p - prev_p);
+		
+					const u32 w = profile.vertices.size();
+					for (u32 i = 0; i < w; ++i) {
+						Geometry::Vertex& v = result->vertices.emplace();
+						v.position = p + side * profile.vertices[i].position.x + up * profile.vertices[i].position.y;
+						v.uv = profile.vertices[i].uv;
+						v.uv.y = d;
+						v.normal = profile.vertices[i].normal;
+						v.normal = side * v.normal.x + up * v.normal.y + dir * v.normal.z;
+						v.tangent = profile.vertices[i].tangent;
+						v.tangent = side * v.tangent.x + up * v.tangent.y + dir * v.tangent.z;
+					}
+		
+					if (rows > 1) {
+						const u32 offset = result->vertices.size() - 2 * w;
+						for (u32 i = 0; i < w - 1; ++i) {
+							result->indices.push(offset + i);
+							result->indices.push(offset + i + 1);
+							result->indices.push(offset + i + w);
+		
+							result->indices.push(offset + i + w + 1);
+							result->indices.push(offset + i + w);
+							result->indices.push(offset + i + 1);
+						}
+					}
+					prev_p = p;
+				}
+		
+				result->type = gpu::PrimitiveType::TRIANGLES;
+				return true;
+			}
+			default: 
+				return false;
+		}
+	}
+};
+
 struct CylinderNode : Node {
 	NodeType getType() const override { return NodeType::CYLINDER; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
 	
 	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(subdivision);
@@ -1130,6 +1164,8 @@ struct CylinderNode : Node {
 
 struct ConeNode : Node {
 	NodeType getType() const override { return NodeType::CONE; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
 	
 	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(subdivision);
@@ -1213,6 +1249,8 @@ struct ConeNode : Node {
 
 struct SphereNode : Node {
 	NodeType getType() const override { return NodeType::SPHERE; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
 	
 	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(size);
@@ -1284,6 +1322,8 @@ struct SphereNode : Node {
 
 struct CubeNode : Node {
 	NodeType getType() const override { return NodeType::CUBE; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
 
 	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(size);
@@ -1355,11 +1395,11 @@ struct CubeNode : Node {
 
 struct MergeNode : Node {
 	NodeType getType() const override { return NodeType::MERGE; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input input0 = getInput(0);
-		if (!input0) return false;
-		if (!input0.getGeometry(result)) return false;
+		if (!getInputGeometry(0, result)) return false;
 
 		const Input input1 = getInput(1);
 		if (input1) {
@@ -1395,6 +1435,8 @@ struct MergeNode : Node {
 
 struct TransformNode : Node {
 	NodeType getType() const override { return NodeType::TRANSFORM; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
 
 	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(translation);
@@ -1409,9 +1451,7 @@ struct TransformNode : Node {
 	}
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input input = getInput(0);
-		if (!input) return false;
-		if (!input.getGeometry(result)) return false;
+		if (!getInputGeometry(0, result)) return false;
 
 		Quat rotation;
 		rotation.fromEuler(euler);
@@ -1444,6 +1484,8 @@ struct TransformNode : Node {
 
 struct GridNode : Node {
 	NodeType getType() const override { return NodeType::GRID; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
 	
 	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(m_cols);
@@ -1499,6 +1541,8 @@ struct GridNode : Node {
 
 struct DistributePointsOnFacesNode : Node {
 	NodeType getType() const override { return NodeType::DISTRIBUTE_POINT_ON_FACES; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
 	
 	void serialize(OutputMemoryStream& blob) const override {
 		blob.write(density);
@@ -1509,10 +1553,9 @@ struct DistributePointsOnFacesNode : Node {
 	}
 
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input input = getInput(0);
-		if (!input) return false;
 		Geometry geom(*m_allocator);
-		if (!input.getGeometry(&geom)) return false;
+
+		if (!getInputGeometry(0, &geom)) return false;
 		if (geom.type != gpu::PrimitiveType::TRIANGLES) return false;
 
 		float total_area = 0;
@@ -1570,11 +1613,11 @@ struct DistributePointsOnFacesNode : Node {
 
 struct OutputGeometryNode : Node {
 	NodeType getType() const override { return NodeType::OUTPUT; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return false; }
 	
 	bool getGeometry(u16 output_idx, Geometry* result) override {
-		const Input input = getInput(0);
-		if (input) return input.getGeometry(result);
-		return false;
+		return getInputGeometry(0, result);
 	}
 
 	void serialize(OutputMemoryStream& blob) const override {
@@ -1654,6 +1697,7 @@ Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 		case NodeType::MODEL: node = LUMIX_NEW(m_allocator, ModelNode); break;
 		case NodeType::INSTANTIATE_PREFAB: node = LUMIX_NEW(m_allocator, InstantiatePrefabNode); break;
 		case NodeType::PLACE_INSTANCES_AT_POINTS: node = LUMIX_NEW(m_allocator, PlaceInstancesAtPoints); break;
+		case NodeType::EXTRUDE_ALONG: node = LUMIX_NEW(m_allocator, ExtrudeAlongNode); break;
 		case NodeType::CYLINDER: node = LUMIX_NEW(m_allocator, CylinderNode); break;
 		case NodeType::CONE: node = LUMIX_NEW(m_allocator, ConeNode); break;
 		case NodeType::SPHERE: node = LUMIX_NEW(m_allocator, SphereNode); break;
