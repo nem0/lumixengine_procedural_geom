@@ -54,7 +54,8 @@ enum class NodeType : u32 {
 	CIRCLE,
 	POINT,
 	INSTANTIATE_PREFAB,
-	MODEL
+	MODEL,
+	SPIRAL
 };
 
 struct Geometry {
@@ -216,6 +217,30 @@ struct EditorResource {
 	u16 m_node_id_genereator = 1;
 };
 
+static const struct {
+	char key;
+	const char* label;
+	NodeType type;
+} TYPES[] = {
+	{ 'O', "Circle", NodeType::CIRCLE },
+	{ 0,   "Cone", NodeType::CONE },
+	{ 'C', "Cube", NodeType::CUBE },
+	{ 0,   "Cylinder", NodeType::CYLINDER },
+	{ 'D', "Distribute points on faces", NodeType::DISTRIBUTE_POINT_ON_FACES },
+	{ 'E', "Extrude along", NodeType::EXTRUDE_ALONG },
+	{ 'G', "Grid", NodeType::GRID },
+	{ 0, "Instantiate prefab", NodeType::INSTANTIATE_PREFAB },
+	{ 'L', "Line", NodeType::LINE },
+	{ 'M', "Merge", NodeType::MERGE },
+	{ 0, "Model", NodeType::MODEL },
+	{ 'I', "Place instances at points", NodeType::PLACE_INSTANCES_AT_POINTS },
+	{ 'P', "Point", NodeType::POINT },
+	{ 0, "Sphere", NodeType::SPHERE },
+	{ 0, "Spiral", NodeType::SPIRAL},
+	{ 'S', "Spline", NodeType::SPLINE },
+	{ 'T', "Transform", NodeType::TRANSFORM },
+};
+
 } // anonymous namespace
 
 static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
@@ -269,25 +294,14 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		m_app.removeAction(&m_apply_action);
 		m_app.removeAction(&m_save_action);
 	}
-	
+
+	void pushUndo(u32 tag) override {
+		if (m_autoapply) apply();
+	}
+
 	void onCanvasClicked(ImVec2 pos, i32 hovered_link) override {
-		static const struct {
-			char key;
-			NodeType type;
-		} types[] = {
-			{ 'C', NodeType::CUBE },
-			{ 'E', NodeType::EXTRUDE_ALONG },
-			{ 'G', NodeType::GRID },
-			{ 'I', NodeType::PLACE_INSTANCES_AT_POINTS },
-			{ 'L', NodeType::LINE },
-			{ 'M', NodeType::MERGE },
-			{ 'O', NodeType::CIRCLE },
-			{ 'P', NodeType::POINT },
-			{ 'S', NodeType::SPLINE },
-			{ 'T', NodeType::TRANSFORM },
-		};
-		for (const auto& t : types) {
-			if (os::isKeyDown((os::Keycode)t.key)) {
+		for (const auto& t : TYPES) {
+			if (t.key && os::isKeyDown((os::Keycode)t.key)) {
 				Node* node = addNode(t.type, pos, false);
 				if (hovered_link >= 0) splitLink(m_resource->m_nodes.back(), m_resource->m_links, hovered_link);
 				pushUndo(NO_MERGE_UNDO);
@@ -301,22 +315,9 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	void onContextMenu(bool recently_opened, ImVec2 pos) override {
 		static char filter[64] = "";
 		Node* new_node = nullptr;
-		if (ImGui::MenuItem("Circle")) new_node = addNode(NodeType::CIRCLE, pos, true);
-		if (ImGui::MenuItem("Cone")) new_node = addNode(NodeType::CONE, pos, true);
-		if (ImGui::MenuItem("Cube")) new_node = addNode(NodeType::CUBE, pos, true);
-		if (ImGui::MenuItem("Cylinder")) new_node = addNode(NodeType::CYLINDER, pos, true);
-		if (ImGui::MenuItem("Distribute points on faces")) new_node = addNode(NodeType::DISTRIBUTE_POINT_ON_FACES, pos, true);
-		if (ImGui::MenuItem("Extrude along")) new_node = addNode(NodeType::EXTRUDE_ALONG, pos, true);
-		if (ImGui::MenuItem("Grid")) new_node = addNode(NodeType::GRID, pos, true);
-		if (ImGui::MenuItem("Instantiate prefab")) new_node = addNode(NodeType::INSTANTIATE_PREFAB, pos, true);
-		if (ImGui::MenuItem("Line")) new_node = addNode(NodeType::LINE, pos, true);
-		if (ImGui::MenuItem("Merge")) new_node = addNode(NodeType::MERGE, pos, true);
-		if (ImGui::MenuItem("Model")) new_node = addNode(NodeType::MODEL, pos, true);
-		if (ImGui::MenuItem("Place instances at points")) new_node = addNode(NodeType::PLACE_INSTANCES_AT_POINTS, pos, true);
-		if (ImGui::MenuItem("Point")) new_node = addNode(NodeType::POINT, pos, true);
-		if (ImGui::MenuItem("Sphere")) new_node = addNode(NodeType::SPHERE, pos, true);
-		if (ImGui::MenuItem("Spline")) new_node = addNode(NodeType::SPLINE, pos, true);
-		if (ImGui::MenuItem("Transform")) new_node = addNode(NodeType::TRANSFORM, pos, true);
+		for (const auto& t : TYPES) {
+			if (ImGui::MenuItem(t.label)) new_node = addNode(t.type, pos, true);
+		}
 	}
 
 	void deserialize(InputMemoryStream& blob) override {
@@ -471,6 +472,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 						if(getSavePath() && m_path.length() != 0) saveAs(m_path.c_str());
 					}
 					menuItem(m_apply_action, canApply());
+					ImGui::MenuItem("Autoapply", nullptr, &m_autoapply);
 					if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
 						for (const String& path : m_recent_paths) {
 							if (ImGui::MenuItem(path.c_str())) load(path.c_str());
@@ -510,6 +512,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	StudioApp& m_app;
 	bool m_is_open = true;
 	Array<String> m_recent_paths;
+	bool m_autoapply = false;
 	bool m_has_focus = false;
 	Action m_toggle_ui;
 	Action m_delete_action;
@@ -564,7 +567,7 @@ struct CircleNode : Node {
 		ImGuiEx::NodeTitle("Circle");
 		outputSlot();
 		bool res = ImGui::DragFloat("Radius", &radius);
-		ImGui::DragInt("Subdivision", (i32*)&subdivision) || res;
+		res = ImGui::DragInt("Subdivision", (i32*)&subdivision) || res;
 		return res;
 	}
 
@@ -606,7 +609,7 @@ struct LineNode : Node {
 		ImGuiEx::NodeTitle("Line");
 		outputSlot();
 		bool res = ImGui::DragFloat("Size", &size);
-		ImGui::DragInt("Subdivision", (i32*)&subdivision) || res;
+		res = ImGui::DragInt("Subdivision", (i32*)&subdivision) || res;
 		return res;
 	}
 
@@ -899,8 +902,8 @@ struct PointNode : Node {
 		ImGuiEx::NodeTitle("Point");
 		outputSlot();
 		bool res = ImGui::DragFloat("X", &position.x);
-		ImGui::DragFloat("Y", &position.y) || res;
-		ImGui::DragFloat("Z", &position.z) || res;
+		res = ImGui::DragFloat("Y", &position.y) || res;
+		res = ImGui::DragFloat("Z", &position.z) || res;
 		return res;
 	}
 
@@ -915,6 +918,66 @@ struct PointNode : Node {
 	}
 
 	Vec3 position = Vec3(0, 0, 0);
+};
+
+struct SpiralNode : Node {
+	NodeType getType() const override { return NodeType::SPIRAL; }
+	
+	void serialize(OutputMemoryStream& blob) const override {
+		blob.write(height);
+		blob.write(radius_start);
+		blob.write(radius_end);
+		blob.write(turns);
+		blob.write(resolution);
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(height);
+		blob.read(radius_start);
+		blob.read(radius_end);
+		blob.read(turns);
+		blob.read(resolution);
+	}
+
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Spiral");
+		outputSlot();
+		bool res = ImGui::DragFloat("Height", &height, 1, FLT_MIN, FLT_MAX);
+		res = ImGui::DragFloat("Start radius", &radius_start, 1, FLT_MIN, FLT_MAX) || res;
+		res = ImGui::DragFloat("End radius", &radius_end, 1, FLT_MIN, FLT_MAX) || res;
+		res = ImGui::DragFloat("Turns", &turns, 1, FLT_MIN, FLT_MAX) || res;
+		res = ImGui::DragInt("Resolution", (i32*)&resolution, 1, 1, 999999) || res;
+		return res;
+	}
+	
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		const u32 count = u32(turns * resolution + 0.5f);
+		if (count == 0) return false;
+		result->vertices.reserve(count);
+		
+		for (u32 i = 0; i < count; ++i) {
+			const float t = i / float(count - 1);
+			const float radius = radius_start * (1 - t) + radius_end * t; 
+			const float h = height * t;
+			const float angle = (turns * t) * 2 * PI;
+			Geometry::Vertex& v = result->vertices.emplace();
+			v.position = Vec3(cosf(angle) * radius, sinf(angle) * radius, h);
+			v.uv = Vec2(h, 0);
+			v.normal = normalize(Vec3(v.position.x, v.position.y, 0));
+			v.tangent = Vec3(-v.normal.y, v.normal.x, 0);
+		}
+		result->type = gpu::PrimitiveType::POINTS;
+		return true;
+	}
+
+	float height = 1;
+	float radius_start = 1;
+	float radius_end = 1;
+	float turns = 4;
+	u32 resolution = 16;
 };
 
 struct SplineNode : Node {
@@ -953,6 +1016,7 @@ struct SplineNode : Node {
 			v.normal = iterator.getNormal();
 			v.tangent = dir;
 			v.uv = Vec2(0, d);
+			// TODO actual step is not uniform
 			iterator.move(step);
 			d += length(v.position - prev_p);
 			prev_p = v.position;
@@ -962,16 +1026,13 @@ struct SplineNode : Node {
 	}
 
 	void serialize(OutputMemoryStream& blob) const override {
-		blob.write(width);
 		blob.write(step);
 	}
 
 	void deserialize(InputMemoryStream& blob) override {
-		blob.read(width);
 		blob.read(step);
 	}
 
-	float width = 1;
 	float step = 0.1f;
 };
 
@@ -1152,8 +1213,8 @@ struct CylinderNode : Node {
 		ImGuiEx::NodeTitle("Cylinder");
 		outputSlot();
 		bool res = ImGui::DragInt("Subdivision", (i32*)&subdivision);
-		ImGui::DragFloat("Radius", &radius) || res;
-		ImGui::DragFloat("Height", &height) || res;
+		res = ImGui::DragFloat("Radius", &radius) || res;
+		res = ImGui::DragFloat("Height", &height) || res;
 		return res;
 	}
 	
@@ -1237,8 +1298,8 @@ struct ConeNode : Node {
 		ImGuiEx::NodeTitle("Cone");
 		outputSlot();
 		bool res = ImGui::DragInt("Subdivision", (i32*)&subdivision);
-		ImGui::DragFloat("Base size", &base_size) || res;
-		ImGui::DragFloat("Height", &height) || res;
+		res = ImGui::DragFloat("Base size", &base_size) || res;
+		res = ImGui::DragFloat("Height", &height) || res;
 		return res;
 	}	
 
@@ -1312,7 +1373,7 @@ struct SphereNode : Node {
 		ImGuiEx::NodeTitle("Sphere");
 		outputSlot();
 		bool res = ImGui::DragInt("Subdivision", (i32*)&subdivision);
-		ImGui::DragFloat("Size", &size) || res;
+		res = ImGui::DragFloat("Size", &size) || res;
 		return res;
 	}
 
@@ -1385,8 +1446,8 @@ struct CubeNode : Node {
 		ImGuiEx::NodeTitle("Cube");
 		outputSlot();
 		bool res = ImGui::DragInt("Vertices X", &size.x);
-		ImGui::DragInt("Vertices Y", &size.y) || res;
-		ImGui::DragInt("Vertices Z", &size.z) || res;
+		res = ImGui::DragInt("Vertices Y", &size.y) || res;
+		res = ImGui::DragInt("Vertices Z", &size.z) || res;
 		return res;
 	}
 
@@ -1469,8 +1530,8 @@ struct TransformNode : Node {
 		inputSlot();
 		ImGui::BeginGroup();
 		bool res = ImGui::DragFloat3("Translation", &translation.x);
-		ImGuiEx::InputRotation("Rotation", &euler.x) || res;
-		ImGui::DragFloat3("Scale", &scale.x) || res;
+		res = ImGuiEx::InputRotation("Rotation", &euler.x) || res;
+		res = ImGui::DragFloat3("Scale", &scale.x) || res;
 		ImGui::EndGroup();
 		ImGui::SameLine();
 		outputSlot();
@@ -1531,7 +1592,7 @@ struct GridNode : Node {
 		ImGuiEx::NodeTitle("Grid");
 		outputSlot();
 		bool res = ImGui::DragInt("Columns", &m_cols);
-		ImGui::DragInt("Rows", &m_rows) || res;
+		res = ImGui::DragInt("Rows", &m_rows) || res;
 		return res;
 	}
 
@@ -1602,10 +1663,10 @@ struct DistributePointsOnFacesNode : Node {
 	bool gui() override {
 		ImGuiEx::NodeTitle("Distribute points on faces");
 		inputSlot();
-		ImGui::DragFloat("Density", &density);
+		bool res = ImGui::DragFloat("Density", &density);
 		ImGui::SameLine();
 		outputSlot();
-		return false;
+		return res;
 	}
 
 	float density = 1.f;
@@ -1691,22 +1752,23 @@ Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 	Node* node;
 	switch (type) {
 		case NodeType::CIRCLE: node = LUMIX_NEW(m_allocator, CircleNode); break;
-		case NodeType::LINE: node = LUMIX_NEW(m_allocator, LineNode); break;
-		case NodeType::POINT: node = LUMIX_NEW(m_allocator, PointNode); break;
-		case NodeType::SPLINE: node = LUMIX_NEW(m_allocator, SplineNode); break;
-		case NodeType::MODEL: node = LUMIX_NEW(m_allocator, ModelNode); break;
-		case NodeType::INSTANTIATE_PREFAB: node = LUMIX_NEW(m_allocator, InstantiatePrefabNode); break;
-		case NodeType::PLACE_INSTANCES_AT_POINTS: node = LUMIX_NEW(m_allocator, PlaceInstancesAtPoints); break;
-		case NodeType::EXTRUDE_ALONG: node = LUMIX_NEW(m_allocator, ExtrudeAlongNode); break;
-		case NodeType::CYLINDER: node = LUMIX_NEW(m_allocator, CylinderNode); break;
 		case NodeType::CONE: node = LUMIX_NEW(m_allocator, ConeNode); break;
-		case NodeType::SPHERE: node = LUMIX_NEW(m_allocator, SphereNode); break;
 		case NodeType::CUBE: node = LUMIX_NEW(m_allocator, CubeNode); break;
-		case NodeType::OUTPUT: node = LUMIX_NEW(m_allocator, OutputGeometryNode); break;
+		case NodeType::CYLINDER: node = LUMIX_NEW(m_allocator, CylinderNode); break;
 		case NodeType::DISTRIBUTE_POINT_ON_FACES: node = LUMIX_NEW(m_allocator, DistributePointsOnFacesNode); break;
+		case NodeType::EXTRUDE_ALONG: node = LUMIX_NEW(m_allocator, ExtrudeAlongNode); break;
 		case NodeType::GRID: node = LUMIX_NEW(m_allocator, GridNode); break;
-		case NodeType::TRANSFORM: node = LUMIX_NEW(m_allocator, TransformNode); break;
+		case NodeType::INSTANTIATE_PREFAB: node = LUMIX_NEW(m_allocator, InstantiatePrefabNode); break;
+		case NodeType::LINE: node = LUMIX_NEW(m_allocator, LineNode); break;
 		case NodeType::MERGE: node = LUMIX_NEW(m_allocator, MergeNode); break;
+		case NodeType::MODEL: node = LUMIX_NEW(m_allocator, ModelNode); break;
+		case NodeType::OUTPUT: node = LUMIX_NEW(m_allocator, OutputGeometryNode); break;
+		case NodeType::POINT: node = LUMIX_NEW(m_allocator, PointNode); break;
+		case NodeType::PLACE_INSTANCES_AT_POINTS: node = LUMIX_NEW(m_allocator, PlaceInstancesAtPoints); break;
+		case NodeType::SPHERE: node = LUMIX_NEW(m_allocator, SphereNode); break;
+		case NodeType::SPLINE: node = LUMIX_NEW(m_allocator, SplineNode); break;
+		case NodeType::SPIRAL: node = LUMIX_NEW(m_allocator, SpiralNode); break;
+		case NodeType::TRANSFORM: node = LUMIX_NEW(m_allocator, TransformNode); break;
 		default: ASSERT(false); return nullptr;
 	}
 	node->m_pos = pos;
