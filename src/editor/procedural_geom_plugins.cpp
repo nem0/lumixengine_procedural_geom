@@ -295,6 +295,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		m_app.removeAction(&m_delete_action);
 		m_app.removeAction(&m_apply_action);
 		m_app.removeAction(&m_save_action);
+		if (m_resource) LUMIX_DELETE(m_allocator, m_resource);
 	}
 
 	void pushUndo(u32 tag) override {
@@ -443,9 +444,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	void newGraph() {
 		clear();
 		m_path = "";
-	
 		addNode(NodeType::OUTPUT, ImVec2(100, 100), false);
-
 		pushUndo(NO_MERGE_UNDO);
 	}
 
