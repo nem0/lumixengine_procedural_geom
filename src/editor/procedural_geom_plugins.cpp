@@ -344,21 +344,12 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	bool hasFocus() override { return m_has_focus; }
 
 	void open(const char* path) {
-		os::InputFile file;
-		if (!file.open(path)) {
+		FileSystem& fs = m_app.getEngine().getFileSystem();
+		OutputMemoryStream data(m_allocator);
+		if (!fs.getContentSync(Path(path), data)) {
 			logError("Failed to load ", path);
 			return;
 		}
-
-		const u32 data_size = (u32)file.size();
-		OutputMemoryStream data(m_allocator);
-		data.resize(data_size);
-		if (!file.read(data.getMutableData(), data_size)) {
-			logError("Failed to load shader ", path);
-			file.close();
-			return;
-		}
-		file.close();
 
 		clear();
 
@@ -376,13 +367,6 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		m_recent_paths.push(static_cast<String&&>(p));
 	}
 
-	void open() {
-		char path[LUMIX_MAX_PATH];
-		if (os::getOpenFilename(Span(path), "Procedural geometry\0*.pgm\0", "pgm")) {
-			open(path);
-		}
-	}
-
 	void clear() {
 		LUMIX_DELETE(m_allocator, m_resource);
 		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
@@ -390,28 +374,19 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	}
 
 	void save() {
-		if (m_path.length() == 0) {
-			if(getSavePath() && m_path.length() != 0) saveAs(m_path.c_str());
-		}
-		else {
-			saveAs(m_path.c_str());
-		}
+		if (m_path.length() == 0) m_show_save_as = true;
+		else saveAs(m_path.c_str());
 	}
 
 	void saveAs(const char* path) {
-		os::OutputFile file;
-		if(!file.open(path)) {
-			logError("Could not save ", path);
-			return;
-		}
-
+		FileSystem& fs = m_app.getEngine().getFileSystem();
+		
 		OutputMemoryStream blob(m_allocator);
 		m_resource->serialize(blob);
 
-		bool success = file.write(blob.data(), blob.size());
-		file.close();
-		if (!success) {
+		if (!fs.saveContentSync(Path(path), blob)) {
 			logError("Could not save ", path);
+			return;
 		}
 
 		m_path = path;
@@ -448,30 +423,19 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		pushUndo(NO_MERGE_UNDO);
 	}
 
-	bool getSavePath() {
-		char path[LUMIX_MAX_PATH];
-		if (os::getSaveFilename(Span(path), "Procedural geometry\0*.pgm\0", "pgm")) {
-			m_path = path;
-			return true;
-		}
-		return false;
-	}
-
 	void onWindowGUI() override {
 		m_has_focus = false;
 		if (!m_is_open) return;
 
 		ImGui::SetNextWindowSize(ImVec2(200, 200), ImGuiCond_FirstUseEver);
 		if (ImGui::Begin("Procedural geometry", &m_is_open, ImGuiWindowFlags_MenuBar)) {
-			m_has_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);		
+			m_has_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 			if (ImGui::BeginMenuBar()) {
 				if (ImGui::BeginMenu("File")) {
 					if (ImGui::MenuItem("New")) newGraph();
-					if (ImGui::MenuItem("Open")) open();
+					if (ImGui::MenuItem("Open")) m_show_open = true;
 					menuItem(m_save_action, true);
-					if (ImGui::MenuItem("Save As")) {
-						if(getSavePath() && m_path.length() != 0) saveAs(m_path.c_str());
-					}
+					if (ImGui::MenuItem("Save As")) m_show_save_as = true;
 					menuItem(m_apply_action, canApply());
 					ImGui::MenuItem("Autoapply", nullptr, &m_autoapply);
 					if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
@@ -489,6 +453,10 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 				}
 				ImGui::EndMenuBar();
 			}
+
+			FileSelector& fs = m_app.getFileSelector();
+			if (fs.gui("Open", &m_show_open, "pgm", false)) open(fs.getPath());
+			if (fs.gui("Save As", &m_show_save_as, "pgm", true)) saveAs(fs.getPath());
 
 			Span span(m_resource->m_material.beginUpdate(), m_resource->m_material.capacity());
 			m_app.getAssetBrowser().resourceInput("material", span, Material::TYPE);
@@ -523,6 +491,8 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	Action m_save_action;
 	Path m_path;
 	EditorResource* m_resource = nullptr;
+	bool m_show_save_as = false;
+	bool m_show_open = false;
 };
 
 template <typename F>
