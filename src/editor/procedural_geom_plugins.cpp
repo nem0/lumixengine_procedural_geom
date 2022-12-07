@@ -315,8 +315,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 
 	void onLinkDoubleClicked(Link& link, ImVec2 pos) override {}
 
-	void onContextMenu(bool recently_opened, ImVec2 pos) override {
-		static char filter[64] = "";
+	void onContextMenu(ImVec2 pos) override {
 		Node* new_node = nullptr;
 		for (const auto& t : TYPES) {
 			if (ImGui::MenuItem(t.label)) new_node = addNode(t.type, pos, true);
