@@ -15,7 +15,7 @@
 #include "engine/prefab.h"
 #include "engine/resource_manager.h"
 #include "engine/string.h"
-#include "engine/universe.h"
+#include "engine/world.h"
 #include "renderer/material.h"
 #include "renderer/model.h"
 #include "renderer/render_scene.h"
@@ -775,9 +775,9 @@ struct InstantiatePrefabNode : Node {
 		if (ImGui::Button("Instantiate")) {
 			WorldEditor& editor = m_resource->m_app.getWorldEditor();
 			const Array<EntityRef>& selected = editor.getSelectedEntities();
-			Universe* universe = editor.getUniverse();
-			while (EntityPtr child = universe->getFirstChild(selected[0])) {
-				universe->destroyEntity(*child);
+			World* world = editor.getWorld();
+			while (EntityPtr child = world->getFirstChild(selected[0])) {
+				world->destroyEntity(*child);
 			}
 			if (selected.size() == 1) instantiate(selected[0]);
 		}
@@ -791,9 +791,9 @@ struct InstantiatePrefabNode : Node {
 		if (!input) return;
 
 		WorldEditor& editor = m_resource->m_app.getWorldEditor();
-		Universe& universe = *editor.getUniverse();
+		World& world = *editor.getWorld();
 		
-		const Transform& transform = universe.getTransform(parent);
+		const Transform& transform = world.getTransform(parent);
 		Geometry points(*m_allocator);
 		if (!input.getGeometry(&points)) return;
 
@@ -802,7 +802,7 @@ struct InstantiatePrefabNode : Node {
 			const DVec3 p = transform.transform(v.position);
 			// TODO rotation
 			const EntityPtr e = prefab_system.instantiatePrefab(*m_prefab, p, transform.rot, transform.scale);
-			if (e.isValid()) universe.setParent(parent, *e);
+			if (e.isValid()) world.setParent(parent, *e);
 		}
 	}
 
@@ -967,10 +967,10 @@ struct SplineNode : Node {
 		const Array<EntityRef>& selected = editor.getSelectedEntities();
 		if (selected.size() != 1) return false;
 
-		Universe& universe = *editor.getUniverse();
-		if (!universe.hasComponent(selected[0], SPLINE_TYPE)) return false;
+		World& world = *editor.getWorld();
+		if (!world.hasComponent(selected[0], SPLINE_TYPE)) return false;
 
-		CoreScene* core_scene = (CoreScene*)universe.getScene(SPLINE_TYPE);
+		CoreScene* core_scene = (CoreScene*)world.getScene(SPLINE_TYPE);
 		const Spline& spline = core_scene->getSpline(selected[0]);
 		if (spline.points.empty()) return false;
 
@@ -1711,13 +1711,13 @@ void ProceduralGeomGeneratorPlugin::apply() {
 	const Array<EntityRef>& selected = m_app.getWorldEditor().getSelectedEntities();
 	if (selected.size() != 1) return;
 	
-	Universe* universe = m_app.getWorldEditor().getUniverse();
+	World* world = m_app.getWorldEditor().getWorld();
 	bool children_removed = false;
 	for (const Node* node : m_resource->m_nodes) {
 		if (node->getType() == NodeType::INSTANTIATE_PREFAB) {
 			if (!children_removed) {
-				while (EntityPtr child = universe->getFirstChild(selected[0])) {
-					universe->destroyEntity(*child);
+				while (EntityPtr child = world->getFirstChild(selected[0])) {
+					world->destroyEntity(*child);
 				}
 				children_removed = true;
 			}
@@ -1730,9 +1730,9 @@ void ProceduralGeomGeneratorPlugin::apply() {
 	Geometry geom(m_allocator);
 	if (!output->getGeometry(0, &geom)) return;
 
-	RenderScene* scene = (RenderScene*)universe->getScene("renderer");
+	RenderScene* scene = (RenderScene*)world->getScene("renderer");
 	
-	if (!universe->hasComponent(selected[0], PROCEDURAL_GEOM_TYPE)) universe->createComponent(PROCEDURAL_GEOM_TYPE, selected[0]);
+	if (!world->hasComponent(selected[0], PROCEDURAL_GEOM_TYPE)) world->createComponent(PROCEDURAL_GEOM_TYPE, selected[0]);
 
 	Span<const u8> vertices((const u8*)geom.vertices.begin(), (u32)geom.vertices.byte_size());
 	Span<const u8> indices((const u8*)geom.indices.begin(), (u32)geom.indices.byte_size());
