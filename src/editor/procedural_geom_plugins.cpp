@@ -18,7 +18,7 @@
 #include "engine/world.h"
 #include "renderer/material.h"
 #include "renderer/model.h"
-#include "renderer/render_scene.h"
+#include "renderer/render_module.h"
 #include <math.h>
 #include <stdlib.h>
 
@@ -970,8 +970,8 @@ struct SplineNode : Node {
 		World& world = *editor.getWorld();
 		if (!world.hasComponent(selected[0], SPLINE_TYPE)) return false;
 
-		CoreScene* core_scene = (CoreScene*)world.getScene(SPLINE_TYPE);
-		const Spline& spline = core_scene->getSpline(selected[0]);
+		CoreModule* core_module = (CoreModule*)world.getModule(SPLINE_TYPE);
+		const Spline& spline = core_module->getSpline(selected[0]);
 		if (spline.points.empty()) return false;
 
 
@@ -1730,7 +1730,7 @@ void ProceduralGeomGeneratorPlugin::apply() {
 	Geometry geom(m_allocator);
 	if (!output->getGeometry(0, &geom)) return;
 
-	RenderScene* scene = (RenderScene*)world->getScene("renderer");
+	RenderModule* module = (RenderModule*)world->getModule("renderer");
 	
 	if (!world->hasComponent(selected[0], PROCEDURAL_GEOM_TYPE)) world->createComponent(PROCEDURAL_GEOM_TYPE, selected[0]);
 
@@ -1752,8 +1752,8 @@ void ProceduralGeomGeneratorPlugin::apply() {
 		}
 		vertices = user_vertices;
 	}
-	scene->setProceduralGeometry(selected[0], vertices, decl, indices, gpu::DataType::U32);
-	scene->setProceduralGeometryMaterial(selected[0], Path(m_resource->m_material));
+	module->setProceduralGeometry(selected[0], vertices, decl, indices, gpu::DataType::U32);
+	module->setProceduralGeometryMaterial(selected[0], Path(m_resource->m_material));
 
 }
 
