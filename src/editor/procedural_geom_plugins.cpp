@@ -56,7 +56,18 @@ enum class NodeType : u32 {
 	INSTANTIATE_PREFAB,
 	MODEL,
 	SPIRAL,
-	SCALE
+	SCALE,
+	ROTATE_POINTS,
+
+	INDEX,
+	FLOAT_CONST,
+	MATH,
+
+	SET_POSITION,
+	SPLIT_VEC3,
+	MAKE_VEC3,
+	POSITION,
+	RANDOM
 };
 
 struct Geometry {
@@ -72,29 +83,24 @@ struct Geometry {
 		, indices(allocator)
 	{}
 
-	Geometry&& move() { return static_cast<Geometry&&>(*this); }
-
 	Array<Vertex> vertices;
 	Array<u32> indices;
 	gpu::PrimitiveType type;
 };
 
-struct Input {
-	struct Node* node = nullptr;
-	u16 output_idx;
-	[[nodiscard]] bool getGeometry(Geometry* result) const;
-	operator bool() const { return node != nullptr; }
-};
+struct ValueInput;
+struct GeometryInput;
 
 struct Node : NodeEditorNode {
 	virtual bool gui() = 0;
 	virtual NodeType getType() const = 0;
-	virtual bool getGeometry(u16 output_idx, Geometry* result) = 0;
 	virtual void serialize(OutputMemoryStream& blob) const {}
 	virtual void deserialize(InputMemoryStream& blob) {}
+	virtual bool isValueNode() const = 0;
 
-	Input getInput(u16 input) const;
+	GeometryInput getGeometryInput(u16 input) const;
 	bool getInputGeometry(u16 input, Geometry* geometry) const;
+	ValueInput getInputValue(u16 input) const;
 
 	bool nodeGUI() override {
 		ImGuiEx::BeginNode(m_id, m_pos, &m_selected);
@@ -120,6 +126,77 @@ struct Node : NodeEditorNode {
 	bool m_selected = false;
 	u16 m_input_counter = 0;
 	u16 m_output_counter = 0;
+};
+
+struct GeometryNode : Node {
+	virtual bool getGeometry(u16 output_idx, Geometry* result) = 0;
+	bool isValueNode() const override { return false; }
+};
+
+struct ValueNode : Node {
+	struct Context {
+		u32 index;
+		const Geometry::Vertex* vertex = nullptr;
+	};
+
+	struct Result {
+		Result() {}
+
+		Result(u32 value) {
+			type = I32;
+			i32_value = value;
+		}
+
+		Result(i32 value) {
+			type = I32;
+			i32_value = value;
+		}
+
+		Result(float value) {
+			type = FLOAT;
+			f_value = value;
+		}
+
+		Result(Vec3 value) {
+			type = VEC3;
+			vec3_value = value;
+		}
+
+		enum Type {
+			INVALID,
+			FLOAT,
+			I32,
+			VEC3
+		};
+
+		Type type = INVALID;
+		union {
+			float f_value;
+			i32 i32_value;
+			Vec3 vec3_value;
+		};
+
+		bool isValid() const { return type != INVALID; }
+	};
+
+	bool isValueNode() const override { return true; }
+	virtual Result getResult(u16 output_idx, const Context& ctx) const = 0;
+};
+
+struct GeometryInput {
+	struct GeometryNode* node = nullptr;
+	u16 output_idx;
+	[[nodiscard]] bool getGeometry(Geometry* result) const;
+	operator bool() const { return node != nullptr; }
+};
+
+struct ValueInput {
+	struct ValueNode* node = nullptr;
+	u16 output_idx;
+	[[nodiscard]] ValueNode::Result getResult(const ValueNode::Context& ctx) const {
+		return node->getResult(output_idx, ctx);
+	}
+	operator bool() const { return node != nullptr; }
 };
 
 struct Header {
@@ -229,17 +306,26 @@ static const struct {
 	{ 0,   "Cylinder", NodeType::CYLINDER },
 	{ 'D', "Distribute points on faces", NodeType::DISTRIBUTE_POINT_ON_FACES },
 	{ 'E', "Extrude along", NodeType::EXTRUDE_ALONG },
+	{ 'F', "Float constant", NodeType::FLOAT_CONST },
 	{ 'G', "Grid", NodeType::GRID },
 	{ 0, "Instantiate prefab", NodeType::INSTANTIATE_PREFAB },
+	{ 'I', "Index", NodeType::INDEX },
 	{ 'L', "Line", NodeType::LINE },
+	{ 0, "Make vector3", NodeType::MAKE_VEC3 },
 	{ 'M', "Merge", NodeType::MERGE },
+	{ 0, "Math", NodeType::MATH },
 	{ 0, "Model", NodeType::MODEL },
+	{ 0, "Random", NodeType::RANDOM },
 	{ 'I', "Place instances at points", NodeType::PLACE_INSTANCES_AT_POINTS },
 	{ 'P', "Point", NodeType::POINT },
+	{ 0, "Position", NodeType::POSITION },
+	{ 'R', "Rotate points", NodeType::ROTATE_POINTS },
 	{ 0, "Scale", NodeType::SCALE },
+	{ 0, "Set position", NodeType::SET_POSITION },
 	{ 0, "Sphere", NodeType::SPHERE },
 	{ 'Q', "Spiral", NodeType::SPIRAL},
 	{ 'S', "Spline", NodeType::SPLINE },
+	{ 0, "Split vector3", NodeType::SPLIT_VEC3 },
 	{ 'T', "Transform", NodeType::TRANSFORM },
 };
 
@@ -507,27 +593,37 @@ static void	forEachInput(const EditorResource& resource, int node_id, const F& f
 	}
 }
 
-bool Input::getGeometry(Geometry* result) const { return node->getGeometry(output_idx, result); }
+bool GeometryInput::getGeometry(Geometry* result) const { return node->getGeometry(output_idx, result); }
 
-
-bool Node::getInputGeometry(u16 input_idx, Geometry* geometry) const {
-	const Input input = getInput(input_idx);
-	if (!input) return false;
-	return input.getGeometry(geometry);
-}
-
-Input Node::getInput(u16 input_idx) const {
-	Input res;
+ValueInput Node::getInputValue(u16 input_idx) const {
+	ValueInput res;
 	forEachInput(*m_resource, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
-		if (to_attr == input_idx) {
+		if (to_attr == input_idx && from->isValueNode()) {
 			res.output_idx = from_attr;
-			res.node = from;
+			res.node = static_cast<ValueNode*>(from);
 		}
 	});
 	return res;
 }
 
-struct CircleNode : Node {
+bool Node::getInputGeometry(u16 input_idx, Geometry* geometry) const {
+	const GeometryInput input = getGeometryInput(input_idx);
+	if (!input) return false;
+	return input.getGeometry(geometry);
+}
+
+GeometryInput Node::getGeometryInput(u16 input_idx) const {
+	GeometryInput res;
+	forEachInput(*m_resource, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
+		if (to_attr == input_idx && !from->isValueNode()) {
+			res.output_idx = from_attr;
+			res.node = static_cast<GeometryNode*>(from);
+		}
+	});
+	return res;
+}
+
+struct CircleNode : GeometryNode {
 	NodeType getType() const override { return NodeType::CIRCLE; }
 
 	bool hasInputPins() const override { return false; }
@@ -569,7 +665,7 @@ struct CircleNode : Node {
 	float radius = 1.f;
 };
 
-struct LineNode : Node {
+struct LineNode : GeometryNode {
 	NodeType getType() const override { return NodeType::LINE; }
 
 	bool hasInputPins() const override { return false; }
@@ -610,7 +706,7 @@ struct LineNode : Node {
 	u32 subdivision = 16;
 };
 
-struct PlaceInstancesAtPoints : Node {
+struct PlaceInstancesAtPoints : GeometryNode {
 	NodeType getType() const override { return NodeType::PLACE_INSTANCES_AT_POINTS; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -663,7 +759,7 @@ struct PlaceInstancesAtPoints : Node {
 	}
 };
 
-struct ModelNode : Node {
+struct ModelNode : GeometryNode {
 	~ModelNode() {
 		if (m_model) m_model->decRefCount();
 	}
@@ -735,7 +831,7 @@ struct ModelNode : Node {
 	Model* m_model = nullptr;
 };
 
-struct InstantiatePrefabNode : Node {
+struct InstantiatePrefabNode : GeometryNode {
 	~InstantiatePrefabNode() {
 		if (m_prefab) m_prefab->decRefCount();
 	}
@@ -787,7 +883,7 @@ struct InstantiatePrefabNode : Node {
 	void instantiate(EntityRef parent) const {
 		if (!m_prefab || !m_prefab->isReady()) return;
 		
-		const Input input = getInput(0);
+		const GeometryInput input = getGeometryInput(0);
 		if (!input) return;
 
 		WorldEditor& editor = m_resource->m_app.getWorldEditor();
@@ -854,7 +950,7 @@ struct SplineIterator {
 	Span<const Vec3> points;
 };
 
-struct PointNode : Node {
+struct PointNode : GeometryNode {
 	NodeType getType() const override { return NodeType::POINT; }
 
 	bool hasInputPins() const override { return false; }
@@ -890,7 +986,7 @@ struct PointNode : Node {
 	Vec3 position = Vec3(0, 0, 0);
 };
 
-struct SpiralNode : Node {
+struct SpiralNode : GeometryNode {
 	NodeType getType() const override { return NodeType::SPIRAL; }
 	
 	void serialize(OutputMemoryStream& blob) const override {
@@ -950,7 +1046,7 @@ struct SpiralNode : Node {
 	u32 resolution = 16;
 };
 
-struct SplineNode : Node {
+struct SplineNode : GeometryNode {
 	NodeType getType() const override { return NodeType::SPLINE; }
 
 	bool hasInputPins() const override { return true; }
@@ -1006,7 +1102,7 @@ struct SplineNode : Node {
 	float step = 0.1f;
 };
 
-struct ExtrudeAlongNode : Node {
+struct ExtrudeAlongNode : GeometryNode {
 	NodeType getType() const override { return NodeType::EXTRUDE_ALONG; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -1084,7 +1180,7 @@ struct ExtrudeAlongNode : Node {
 	}
 };
 
-struct CylinderNode : Node {
+struct CylinderNode : GeometryNode {
 	NodeType getType() const override { return NodeType::CYLINDER; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return true; }
@@ -1193,7 +1289,7 @@ struct CylinderNode : Node {
 	float height = 1;
 };
 
-struct ConeNode : Node {
+struct ConeNode : GeometryNode {
 	NodeType getType() const override { return NodeType::CONE; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return true; }
@@ -1278,7 +1374,7 @@ struct ConeNode : Node {
 	float height = 3;
 };
 
-struct SphereNode : Node {
+struct SphereNode : GeometryNode {
 	NodeType getType() const override { return NodeType::SPHERE; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return true; }
@@ -1351,7 +1447,7 @@ struct SphereNode : Node {
 	float size = 1.f;
 };
 
-struct CubeNode : Node {
+struct CubeNode : GeometryNode {
 	NodeType getType() const override { return NodeType::CUBE; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return true; }
@@ -1421,10 +1517,10 @@ struct CubeNode : Node {
 		return res;
 	}
 
-	IVec3 size = IVec3(2);	
+	IVec3 size = IVec3(2);
 };
 
-struct MergeNode : Node {
+struct MergeNode : GeometryNode {
 	NodeType getType() const override { return NodeType::MERGE; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -1432,7 +1528,7 @@ struct MergeNode : Node {
 	bool getGeometry(u16 output_idx, Geometry* result) override {
 		if (!getInputGeometry(0, result)) return false;
 
-		const Input input1 = getInput(1);
+		const GeometryInput input1 = getGeometryInput(1);
 		if (input1) {
 			Geometry tmp(*m_allocator);
 			if (!input1.getGeometry(&tmp)) return false;
@@ -1464,7 +1560,7 @@ struct MergeNode : Node {
 	}
 };
 
-struct TransformNode : Node {
+struct TransformNode : GeometryNode {
 	NodeType getType() const override { return NodeType::TRANSFORM; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -1513,7 +1609,7 @@ struct TransformNode : Node {
 	Vec3 scale = Vec3(1);
 };
 
-struct ScaleNode : Node {
+struct ScaleNode : GeometryNode {
 	NodeType getType() const override { return NodeType::SCALE; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -1552,7 +1648,7 @@ struct ScaleNode : Node {
 
 	Vec3 scale = Vec3(1);
 };
-struct GridNode : Node {
+struct GridNode : GeometryNode {
 	NodeType getType() const override { return NodeType::GRID; }
 	bool hasInputPins() const override { return false; }
 	bool hasOutputPins() const override { return true; }
@@ -1609,7 +1705,332 @@ struct GridNode : Node {
 	i32 m_rows = 10;
 };
 
-struct DistributePointsOnFacesNode : Node {
+struct MakeVec3Node : ValueNode {
+	NodeType getType() const override { return NodeType::MAKE_VEC3; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override {}
+	void deserialize(InputMemoryStream& blob) override {}
+
+	static float toFloat(const ValueInput& val, const Context& ctx) {
+		if (!val) return 0;
+		const ValueNode::Result res = val.getResult(ctx);
+		if (!res.isValid()) return 0;
+		switch (res.type) {
+			case ValueNode::Result::FLOAT: return res.f_value;
+			case ValueNode::Result::I32: return (float)res.i32_value;
+			default: ASSERT(false); return 0;
+		}
+	}
+
+	Result getResult(u16 output_idx, const Context& ctx) const override {
+		const ValueInput iX = getInputValue(0);
+		const ValueInput iY = getInputValue(0);
+		const ValueInput iZ = getInputValue(0);
+		
+		float x = toFloat(iX, ctx);
+		float y = toFloat(iY, ctx);
+		float z = toFloat(iZ, ctx);
+
+		return Result(Vec3(x, y, z));
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Make vector3");
+		inputSlot();
+		outputSlot();
+		ImGui::TextUnformatted("X");
+		inputSlot();
+		ImGui::TextUnformatted("Y");
+		inputSlot();
+		ImGui::TextUnformatted("Z");
+		return false;
+	}
+
+	float m_value = 0;
+};
+
+struct SplitVec3Node : ValueNode {
+	NodeType getType() const override { return NodeType::SPLIT_VEC3; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override {}
+	void deserialize(InputMemoryStream& blob) override {}
+	
+	Result getResult(u16 output_idx, const Context& ctx) const override {
+		const ValueInput in = getInputValue(0);
+		if (!in) return {};
+		
+		const Result in_res = in.getResult(ctx);
+		if (in_res.type != Result::VEC3) return {};
+
+		switch (output_idx) {
+			case 0: return Result(in_res.vec3_value.x);
+			case 1: return Result(in_res.vec3_value.y);
+			case 2: return Result(in_res.vec3_value.z);
+			default: ASSERT(false); return Result(0.f);
+		}
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Split vector3");
+		inputSlot();
+		outputSlot();
+		ImGui::TextUnformatted("X");
+		outputSlot();
+		ImGui::TextUnformatted("Y");
+		outputSlot();
+		ImGui::TextUnformatted("Z");
+		return false;
+	}
+
+	float m_value = 0;
+};
+
+struct RandomNode : ValueNode {
+	NodeType getType() const override { return NodeType::RANDOM; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override { blob.write(m_from); blob.write(m_to); }
+	void deserialize(InputMemoryStream& blob) override { blob.read(m_from); blob.read(m_to); }
+	
+	Result getResult(u16 output_idx, const Context& ctx) const override {
+		return Result(randFloat(m_from, m_to));
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Random");
+		outputSlot();
+		bool res = ImGui::DragFloat("From", &m_from);
+		res = ImGui::DragFloat("To", &m_to) || res;
+		return res;
+	}
+
+	float m_from = 0;
+	float m_to = 1;
+};
+
+struct FloatConstNode : ValueNode {
+	NodeType getType() const override { return NodeType::FLOAT_CONST; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override { blob.write(m_value); }
+	void deserialize(InputMemoryStream& blob) override { blob.read(m_value); }
+	
+	Result getResult(u16 output_idx, const Context& ctx) const override {
+		return Result(m_value);
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Float");
+		outputSlot();
+		return ImGui::DragFloat("Value", &m_value);
+	}
+
+	float m_value = 0;
+};
+
+struct MathNode : ValueNode {
+	NodeType getType() const override { return NodeType::MATH; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override {}
+	void deserialize(InputMemoryStream& blob) override {}
+	
+
+	
+	template <typename T0, typename T1> Result op(T0 v0, T1 v1) const { 
+		switch (m_operator) {
+			case ADD: return v0 + v1;
+			case MULTIPLY: return v0 * v1;
+		}
+		return {};
+	}
+
+
+	Result getResult(u16 output_idx, const Context& ctx) const override {
+		const ValueInput i0 = getInputValue(0);
+		const ValueInput i1 = getInputValue(1);
+		if (!i0 || !i1) return {};
+		
+		const Result r0 = i0.getResult(ctx);
+		const Result r1 = i1.getResult(ctx);
+		if (!r0.isValid() || !r1.isValid()) return {};
+
+		switch (r0.type) {
+			case Result::INVALID: ASSERT(false); break;
+			case Result::I32:
+				switch (r1.type) {
+					case Result::INVALID: ASSERT(false); break;
+					case Result::I32: return op(r0.i32_value, r1.i32_value);
+					case Result::FLOAT: return op(r0.i32_value, r1.f_value);
+					case Result::VEC3: return op(r1.vec3_value, Vec3((float)r0.i32_value));
+				}
+				break;
+			case Result::FLOAT:
+				switch (r1.type) {
+					case Result::INVALID: ASSERT(false); break;
+					case Result::I32: return op(r0.f_value, r1.i32_value);
+					case Result::FLOAT: return op(r0.f_value, r1.f_value);
+					case Result::VEC3: return op(r1.vec3_value, Vec3(r0.f_value));
+				}
+				break;
+			case Result::VEC3:
+				switch (r1.type) {
+					case Result::INVALID: ASSERT(false); break;
+					case Result::I32: return op(r0.vec3_value, Vec3((float)r1.i32_value));
+					case Result::FLOAT: return op(r0.vec3_value, Vec3(r1.f_value));
+					case Result::VEC3: return op(r1.vec3_value, r0.vec3_value);
+				}
+				break;
+		}
+		ASSERT(false);
+		return {};
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Math");
+		outputSlot();
+		inputSlot();
+		ImGui::TextUnformatted("A");
+		inputSlot();
+		ImGui::TextUnformatted("B");
+		return ImGui::Combo("Operation", (i32*)&m_operator, "Add\0Multiply\0");
+	}
+
+	enum Operator : u32 {
+		ADD,
+		MULTIPLY
+	};
+
+	Operator m_operator;
+};
+
+struct PositionNode : ValueNode {
+	NodeType getType() const override { return NodeType::POSITION; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override {}
+	void deserialize(InputMemoryStream& blob) override {}
+	
+	Result getResult(u16 output_idx, const Context& ctx) const override {
+		return ctx.vertex ? Result(ctx.vertex->position) : Result();
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Position");
+		outputSlot();
+		ImGui::TextUnformatted(" ");
+		return false;
+	}
+};
+struct IndexNode : ValueNode {
+	NodeType getType() const override { return NodeType::INDEX; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override {}
+	void deserialize(InputMemoryStream& blob) override {}
+	
+	Result getResult(u16 output_idx, const Context& ctx) const override {
+		return Result(ctx.index);
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Index");
+		outputSlot();
+		ImGui::TextUnformatted(" ");
+		return false;
+	}
+};
+
+struct SetPositionNode : GeometryNode {
+	NodeType getType() const override { return NodeType::SET_POSITION; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override {}
+	void deserialize(InputMemoryStream& blob) override {}
+	
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		if (!getInputGeometry(0, result)) return false;
+		
+		const ValueInput value = getInputValue(1);
+		if (!value) return false;
+		
+		ValueNode::Context ctx;
+		for (Geometry::Vertex& v : result->vertices) {
+			ctx.index = u32(&v - result->vertices.begin());
+			ctx.vertex = &v;
+			const ValueNode::Result value_res = value.getResult(ctx);
+			if (!value_res.isValid()) return false;
+			if (value_res.type != ValueNode::Result::VEC3) return false;
+
+			v.position = value_res.vec3_value;
+		}
+
+		return true;
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Set position");
+		outputSlot();
+		inputSlot();
+		ImGui::TextUnformatted("Geometry");
+		inputSlot();
+		ImGui::TextUnformatted("Position");
+		return false;
+	}
+};
+
+struct RotatePointsNode : GeometryNode {
+	NodeType getType() const override { return NodeType::ROTATE_POINTS; }
+	bool hasInputPins() const override { return true; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override {}
+	void deserialize(InputMemoryStream& blob) override {}
+	
+	bool getGeometry(u16 output_idx, Geometry* result) override {
+		if (!getInputGeometry(0, result)) return false;
+		
+		const ValueInput value = getInputValue(1);
+		if (!value) return false;
+		
+		ValueNode::Context ctx;
+		for (Geometry::Vertex& v : result->vertices) {
+			ctx.index = u32(&v - result->vertices.begin());
+			ctx.vertex = &v;
+			const ValueNode::Result value_res = value.getResult(ctx);
+			if (!value_res.isValid()) continue;
+
+			float angle = 0;
+			switch (value_res.type) {
+				case ValueNode::Result::FLOAT: angle = value_res.f_value; break;
+				case ValueNode::Result::I32: angle = (float)value_res.i32_value; break;
+				case ValueNode::Result::VEC3: // TODO
+				case ValueNode::Result::INVALID: ASSERT(false); break;
+			}
+			float c = cosf(angle);
+			float s = sinf(angle);
+			Vec3 n = v.normal;
+			Vec3 side = normalize(cross(v.tangent, n));
+			v.normal = normalize(c * n + s * side);
+		}
+
+		return true;
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Rotate points");
+		outputSlot();
+		inputSlot();
+		ImGui::TextUnformatted("Geometry");
+		inputSlot();
+		ImGui::TextUnformatted("Angle");
+		
+		return false;
+	}
+};
+
+struct DistributePointsOnFacesNode : GeometryNode {
 	NodeType getType() const override { return NodeType::DISTRIBUTE_POINT_ON_FACES; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
@@ -1681,7 +2102,7 @@ struct DistributePointsOnFacesNode : Node {
 	float density = 1.f;
 };
 
-struct OutputGeometryNode : Node {
+struct OutputGeometryNode : GeometryNode {
 	NodeType getType() const override { return NodeType::OUTPUT; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return false; }
@@ -1766,17 +2187,26 @@ Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 		case NodeType::CYLINDER: node = LUMIX_NEW(m_allocator, CylinderNode); break;
 		case NodeType::DISTRIBUTE_POINT_ON_FACES: node = LUMIX_NEW(m_allocator, DistributePointsOnFacesNode); break;
 		case NodeType::EXTRUDE_ALONG: node = LUMIX_NEW(m_allocator, ExtrudeAlongNode); break;
+		case NodeType::FLOAT_CONST: node = LUMIX_NEW(m_allocator, FloatConstNode); break;
 		case NodeType::GRID: node = LUMIX_NEW(m_allocator, GridNode); break;
+		case NodeType::INDEX: node = LUMIX_NEW(m_allocator, IndexNode); break;
 		case NodeType::INSTANTIATE_PREFAB: node = LUMIX_NEW(m_allocator, InstantiatePrefabNode); break;
 		case NodeType::LINE: node = LUMIX_NEW(m_allocator, LineNode); break;
+		case NodeType::MAKE_VEC3: node = LUMIX_NEW(m_allocator, MakeVec3Node); break;
 		case NodeType::MERGE: node = LUMIX_NEW(m_allocator, MergeNode); break;
 		case NodeType::MODEL: node = LUMIX_NEW(m_allocator, ModelNode); break;
+		case NodeType::MATH: node = LUMIX_NEW(m_allocator, MathNode); break;
+		case NodeType::RANDOM: node = LUMIX_NEW(m_allocator, RandomNode); break;
 		case NodeType::OUTPUT: node = LUMIX_NEW(m_allocator, OutputGeometryNode); break;
 		case NodeType::POINT: node = LUMIX_NEW(m_allocator, PointNode); break;
+		case NodeType::POSITION: node = LUMIX_NEW(m_allocator, PositionNode); break;
 		case NodeType::PLACE_INSTANCES_AT_POINTS: node = LUMIX_NEW(m_allocator, PlaceInstancesAtPoints); break;
+		case NodeType::ROTATE_POINTS: node = LUMIX_NEW(m_allocator, RotatePointsNode); break;
 		case NodeType::SCALE: node = LUMIX_NEW(m_allocator, ScaleNode); break;
+		case NodeType::SET_POSITION: node = LUMIX_NEW(m_allocator, SetPositionNode); break;
 		case NodeType::SPHERE: node = LUMIX_NEW(m_allocator, SphereNode); break;
 		case NodeType::SPLINE: node = LUMIX_NEW(m_allocator, SplineNode); break;
+		case NodeType::SPLIT_VEC3: node = LUMIX_NEW(m_allocator, SplitVec3Node); break;
 		case NodeType::SPIRAL: node = LUMIX_NEW(m_allocator, SpiralNode); break;
 		case NodeType::TRANSFORM: node = LUMIX_NEW(m_allocator, TransformNode); break;
 		default: ASSERT(false); return nullptr;
