@@ -329,299 +329,43 @@ static const struct {
 	{ 'T', "Transform", NodeType::TRANSFORM },
 };
 
-} // anonymous namespace
-
-static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
-
-struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
-	ProceduralGeomGeneratorPlugin(StudioApp& app)
-		: m_app(app)
-		, m_allocator(app.getAllocator())
-		, m_recent_paths(app.getAllocator())
-		, NodeEditor(app.getAllocator())
-	{
-		m_delete_action.init(ICON_FA_TRASH "Delete", "Procedural geometry editor delete", "proc_geom_editor_delete", ICON_FA_TRASH, os::Keycode::DEL, Action::Modifiers::NONE, true);
-		m_delete_action.func.bind<&ProceduralGeomGeneratorPlugin::deleteSelectedNodes>(this);
-		m_delete_action.plugin = this;
-
-		m_undo_action.init(ICON_FA_UNDO "Undo", "Procedural geometry editor undo", "proc_geom_editor_undo", ICON_FA_UNDO, os::Keycode::Z, Action::Modifiers::CTRL, true);
-		m_undo_action.func.bind<&ProceduralGeomGeneratorPlugin::undo>((SimpleUndoRedo*)this);
-		m_undo_action.plugin = this;
-
-		m_redo_action.init(ICON_FA_REDO "Redo", "Procedural geometry editor redo", "proc_geom_editor_redo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
-		m_redo_action.func.bind<&ProceduralGeomGeneratorPlugin::redo>((SimpleUndoRedo*)this);
-		m_redo_action.plugin = this;
-
-		m_apply_action.init("Apply", "Procedural geometry editor apply", "proc_geom_editor_apply", ICON_FA_CHECK, os::Keycode::E, Action::Modifiers::CTRL, true);
-		m_apply_action.func.bind<&ProceduralGeomGeneratorPlugin::apply>(this);
-		m_apply_action.plugin = this;
-
-		m_save_action.init(ICON_FA_SAVE "Save", "Procedural geometry editor save", "proc_geom_editor_save", ICON_FA_SAVE, os::Keycode::S, Action::Modifiers::CTRL, true);
-		m_save_action.func.bind<&ProceduralGeomGeneratorPlugin::save>(this);
-		m_save_action.plugin = this;
-
-		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", true);
-		m_toggle_ui.func.bind<&ProceduralGeomGeneratorPlugin::toggleOpen>(this);
-		m_toggle_ui.is_selected.bind<&ProceduralGeomGeneratorPlugin::isOpen>(this);
-		
-		app.addWindowAction(&m_toggle_ui);
-		app.addAction(&m_undo_action);
-		app.addAction(&m_redo_action);
-		app.addAction(&m_delete_action);
-		app.addAction(&m_apply_action);
-		app.addAction(&m_save_action);
-
-		newGraph();
-	}
-
-	~ProceduralGeomGeneratorPlugin(){
-		m_app.removeAction(&m_toggle_ui);
-		m_app.removeAction(&m_undo_action);
-		m_app.removeAction(&m_redo_action);
-		m_app.removeAction(&m_delete_action);
-		m_app.removeAction(&m_apply_action);
-		m_app.removeAction(&m_save_action);
-		if (m_resource) LUMIX_DELETE(m_allocator, m_resource);
-	}
-
-	void pushUndo(u32 tag) override {
-		if (m_autoapply) apply();
-	}
-
-	void onCanvasClicked(ImVec2 pos, i32 hovered_link) override {
-		for (const auto& t : TYPES) {
-			if (t.key && os::isKeyDown((os::Keycode)t.key)) {
-				Node* node = addNode(t.type, pos, false);
-				if (hovered_link >= 0) splitLink(m_resource->m_nodes.back(), m_resource->m_links, hovered_link);
-				pushUndo(NO_MERGE_UNDO);
-				break;
-			}
-		}
-	}
-
-	void onLinkDoubleClicked(Link& link, ImVec2 pos) override {}
-
-	void onContextMenu(ImVec2 pos) override {
-		Node* new_node = nullptr;
-		for (const auto& t : TYPES) {
-			if (ImGui::MenuItem(t.label)) new_node = addNode(t.type, pos, true);
-		}
-	}
-
-	void deserialize(InputMemoryStream& blob) override {
-		LUMIX_DELETE(m_allocator, m_resource);
-		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
-		m_resource->deserialize(blob, "");
+struct PositionNode : ValueNode {
+	NodeType getType() const override { return NodeType::POSITION; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override {}
+	void deserialize(InputMemoryStream& blob) override {}
+	
+	Result getResult(u16 output_idx, const Context& ctx) const override {
+		return ctx.vertex ? Result(ctx.vertex->position) : Result();
 	}
 	
-	void serialize(OutputMemoryStream& blob) override {
-		m_resource->serialize(blob);
+	bool gui() override {
+		ImGuiEx::NodeTitle("Position");
+		outputSlot();
+		ImGui::TextUnformatted(" ");
+		return false;
 	}
-
-	void deleteSelectedNodes() {
-		if (m_is_any_item_active) return;
-		m_resource->deleteSelectedNodes();
-		pushUndo(NO_MERGE_UNDO);
-	}
-
-	bool isOpen() const { return m_is_open; }
-	void toggleOpen() { m_is_open = !m_is_open; }
-	bool hasFocus() override { return m_has_focus; }
-
-	void open(const char* path) {
-		FileSystem& fs = m_app.getEngine().getFileSystem();
-		OutputMemoryStream data(m_allocator);
-		if (!fs.getContentSync(Path(path), data)) {
-			logError("Failed to load ", path);
-			return;
-		}
-
-		clear();
-
-		InputMemoryStream blob(data);
-		m_resource->deserialize(blob, path);
-
-		m_path = path;
-		pushRecent(path);
-		pushUndo(NO_MERGE_UNDO);
-	}
-
-	void pushRecent(const char* path) {
-		String p(path, m_app.getAllocator());
-		m_recent_paths.eraseItems([&](const String& s) { return s == path; });
-		m_recent_paths.push(static_cast<String&&>(p));
-	}
-
-	void clear() {
-		LUMIX_DELETE(m_allocator, m_resource);
-		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
-		clearUndoStack();
-	}
-
-	void save() {
-		if (m_path.length() == 0) m_show_save_as = true;
-		else saveAs(m_path.c_str());
-	}
-
-	void saveAs(const char* path) {
-		FileSystem& fs = m_app.getEngine().getFileSystem();
-		
-		OutputMemoryStream blob(m_allocator);
-		m_resource->serialize(blob);
-
-		if (!fs.saveContentSync(Path(path), blob)) {
-			logError("Could not save ", path);
-			return;
-		}
-
-		m_path = path;
-		pushRecent(path);
-	}
-
-	void onSettingsLoaded() override {
-		Settings& settings = m_app.getSettings();
-		m_is_open = settings.getValue(Settings::GLOBAL, "is_procedural_geom_editor_open", false);
-		char tmp[LUMIX_MAX_PATH];
-		m_recent_paths.clear();
-		for (u32 i = 0; ; ++i) {
-			const StaticString<32> key("procedural_geom_editor_recent_", i);
-			const u32 len = settings.getValue(Settings::LOCAL, key, Span(tmp));
-			if (len == 0) break;
-			m_recent_paths.emplace(tmp, m_app.getAllocator());
-		}
-	}
-
-	void onBeforeSettingsSaved() override {
-		Settings& settings = m_app.getSettings();
-		settings.setValue(Settings::GLOBAL, "is_procedural_geom_editor_open", m_is_open);
-		for (const String& p : m_recent_paths) {
-			const u32 i = u32(&p - m_recent_paths.begin());	
-			const StaticString<32> key("procedural_geom_editor_recent_", i);
-			settings.setValue(Settings::LOCAL, key, p.c_str());
-		}
-	}
-
-	void newGraph() {
-		clear();
-		m_path = "";
-		addNode(NodeType::OUTPUT, ImVec2(100, 100), false);
-		pushUndo(NO_MERGE_UNDO);
-	}
-
-	void onWindowGUI() override {
-		m_has_focus = false;
-		if (!m_is_open) return;
-
-		ImGui::SetNextWindowSize(ImVec2(200, 200), ImGuiCond_FirstUseEver);
-		if (ImGui::Begin("Procedural geometry", &m_is_open, ImGuiWindowFlags_MenuBar)) {
-			m_has_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
-			if (ImGui::BeginMenuBar()) {
-				if (ImGui::BeginMenu("File")) {
-					if (ImGui::MenuItem("New")) newGraph();
-					if (ImGui::MenuItem("Open")) m_show_open = true;
-					menuItem(m_save_action, true);
-					if (ImGui::MenuItem("Save As")) m_show_save_as = true;
-					menuItem(m_apply_action, canApply());
-					ImGui::MenuItem("Autoapply", nullptr, &m_autoapply);
-					if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
-						for (const String& path : m_recent_paths) {
-							if (ImGui::MenuItem(path.c_str())) open(path.c_str());
-						}
-						ImGui::EndMenu();
-					}
-					ImGui::EndMenu();
-				}
-				if (ImGui::BeginMenu("Edit")) {
-					menuItem(m_undo_action, canUndo());
-					menuItem(m_redo_action, canRedo());
-					ImGui::EndMenu();
-				}
-				ImGui::EndMenuBar();
-			}
-
-			FileSelector& fs = m_app.getFileSelector();
-			if (fs.gui("Open", &m_show_open, "pgm", false)) open(fs.getPath());
-			if (fs.gui("Save As", &m_show_save_as, "pgm", true)) saveAs(fs.getPath());
-
-			Span span(m_resource->m_material.beginUpdate(), m_resource->m_material.capacity());
-			m_app.getAssetBrowser().resourceInput("material", span, Material::TYPE);
-			m_resource->m_material.endUpdate();	
-
-			nodeEditorGUI(m_resource->m_nodes, m_resource->m_links);
-		}
-		ImGui::End();
-	}
-	
-
-	bool canApply() {
-		return m_resource->m_material.length() != 0 && !m_app.getWorldEditor().getSelectedEntities().empty();
-	}
-
-	void apply();
-	Node* addNode(NodeType type, ImVec2 pos, bool save_undo);
-
-	const char* getName() const override { return "procedural_geom_generator"; }
-	
-	IAllocator& m_allocator;
-	StudioApp& m_app;
-	bool m_is_open = true;
-	Array<String> m_recent_paths;
-	bool m_autoapply = false;
-	bool m_has_focus = false;
-	Action m_toggle_ui;
-	Action m_delete_action;
-	Action m_undo_action;
-	Action m_redo_action;
-	Action m_apply_action;
-	Action m_save_action;
-	Path m_path;
-	EditorResource* m_resource = nullptr;
-	bool m_show_save_as = false;
-	bool m_show_open = false;
 };
 
-template <typename F>
-static void	forEachInput(const EditorResource& resource, int node_id, const F& f) {
-	for (const Link& link : resource.m_links) {
-		if (toNodeId(link.to) == node_id) {
-			const int iter = resource.m_nodes.find([&](const Node* node) { return node->m_id == toNodeId(link.from); }); 
-			Node* from = resource.m_nodes[iter];
-			const u16 from_attr = toAttrIdx(link.from);
-			const u16 to_attr = toAttrIdx(link.to);
-			f(from, from_attr, to_attr, u32(&link - resource.m_links.begin()));
-		}
+struct IndexNode : ValueNode {
+	NodeType getType() const override { return NodeType::INDEX; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+	void serialize(OutputMemoryStream& blob) const override {}
+	void deserialize(InputMemoryStream& blob) override {}
+	
+	Result getResult(u16 output_idx, const Context& ctx) const override {
+		return Result(ctx.index);
 	}
-}
-
-bool GeometryInput::getGeometry(Geometry* result) const { return node->getGeometry(output_idx, result); }
-
-ValueInput Node::getInputValue(u16 input_idx) const {
-	ValueInput res;
-	forEachInput(*m_resource, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
-		if (to_attr == input_idx && from->isValueNode()) {
-			res.output_idx = from_attr;
-			res.node = static_cast<ValueNode*>(from);
-		}
-	});
-	return res;
-}
-
-bool Node::getInputGeometry(u16 input_idx, Geometry* geometry) const {
-	const GeometryInput input = getGeometryInput(input_idx);
-	if (!input) return false;
-	return input.getGeometry(geometry);
-}
-
-GeometryInput Node::getGeometryInput(u16 input_idx) const {
-	GeometryInput res;
-	forEachInput(*m_resource, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
-		if (to_attr == input_idx && !from->isValueNode()) {
-			res.output_idx = from_attr;
-			res.node = static_cast<GeometryNode*>(from);
-		}
-	});
-	return res;
-}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Index");
+		outputSlot();
+		ImGui::TextUnformatted(" ");
+		return false;
+	}
+};
 
 struct CircleNode : GeometryNode {
 	NodeType getType() const override { return NodeType::CIRCLE; }
@@ -1648,6 +1392,7 @@ struct ScaleNode : GeometryNode {
 
 	Vec3 scale = Vec3(1);
 };
+
 struct GridNode : GeometryNode {
 	NodeType getType() const override { return NodeType::GRID; }
 	bool hasInputPins() const override { return false; }
@@ -1906,43 +1651,6 @@ struct MathNode : ValueNode {
 	Operator m_operator;
 };
 
-struct PositionNode : ValueNode {
-	NodeType getType() const override { return NodeType::POSITION; }
-	bool hasInputPins() const override { return false; }
-	bool hasOutputPins() const override { return true; }
-	void serialize(OutputMemoryStream& blob) const override {}
-	void deserialize(InputMemoryStream& blob) override {}
-	
-	Result getResult(u16 output_idx, const Context& ctx) const override {
-		return ctx.vertex ? Result(ctx.vertex->position) : Result();
-	}
-	
-	bool gui() override {
-		ImGuiEx::NodeTitle("Position");
-		outputSlot();
-		ImGui::TextUnformatted(" ");
-		return false;
-	}
-};
-struct IndexNode : ValueNode {
-	NodeType getType() const override { return NodeType::INDEX; }
-	bool hasInputPins() const override { return false; }
-	bool hasOutputPins() const override { return true; }
-	void serialize(OutputMemoryStream& blob) const override {}
-	void deserialize(InputMemoryStream& blob) override {}
-	
-	Result getResult(u16 output_idx, const Context& ctx) const override {
-		return Result(ctx.index);
-	}
-	
-	bool gui() override {
-		ImGuiEx::NodeTitle("Index");
-		outputSlot();
-		ImGui::TextUnformatted(" ");
-		return false;
-	}
-};
-
 struct SetPositionNode : GeometryNode {
 	NodeType getType() const override { return NodeType::SET_POSITION; }
 	bool hasInputPins() const override { return true; }
@@ -2127,6 +1835,300 @@ struct OutputGeometryNode : GeometryNode {
 
 	u32 user_channels_count = 0;
 };
+
+} // anonymous namespace
+
+static const ComponentType MODEL_INSTANCE_TYPE = reflection::getComponentType("model_instance");
+
+struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
+	ProceduralGeomGeneratorPlugin(StudioApp& app)
+		: m_app(app)
+		, m_allocator(app.getAllocator())
+		, m_recent_paths(app.getAllocator())
+		, NodeEditor(app.getAllocator())
+	{
+		m_delete_action.init(ICON_FA_TRASH "Delete", "Procedural geometry editor delete", "proc_geom_editor_delete", ICON_FA_TRASH, os::Keycode::DEL, Action::Modifiers::NONE, true);
+		m_delete_action.func.bind<&ProceduralGeomGeneratorPlugin::deleteSelectedNodes>(this);
+		m_delete_action.plugin = this;
+
+		m_undo_action.init(ICON_FA_UNDO "Undo", "Procedural geometry editor undo", "proc_geom_editor_undo", ICON_FA_UNDO, os::Keycode::Z, Action::Modifiers::CTRL, true);
+		m_undo_action.func.bind<&ProceduralGeomGeneratorPlugin::undo>((SimpleUndoRedo*)this);
+		m_undo_action.plugin = this;
+
+		m_redo_action.init(ICON_FA_REDO "Redo", "Procedural geometry editor redo", "proc_geom_editor_redo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
+		m_redo_action.func.bind<&ProceduralGeomGeneratorPlugin::redo>((SimpleUndoRedo*)this);
+		m_redo_action.plugin = this;
+
+		m_apply_action.init("Apply", "Procedural geometry editor apply", "proc_geom_editor_apply", ICON_FA_CHECK, os::Keycode::E, Action::Modifiers::CTRL, true);
+		m_apply_action.func.bind<&ProceduralGeomGeneratorPlugin::apply>(this);
+		m_apply_action.plugin = this;
+
+		m_save_action.init(ICON_FA_SAVE "Save", "Procedural geometry editor save", "proc_geom_editor_save", ICON_FA_SAVE, os::Keycode::S, Action::Modifiers::CTRL, true);
+		m_save_action.func.bind<&ProceduralGeomGeneratorPlugin::save>(this);
+		m_save_action.plugin = this;
+
+		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", true);
+		m_toggle_ui.func.bind<&ProceduralGeomGeneratorPlugin::toggleOpen>(this);
+		m_toggle_ui.is_selected.bind<&ProceduralGeomGeneratorPlugin::isOpen>(this);
+		
+		app.addWindowAction(&m_toggle_ui);
+		app.addAction(&m_undo_action);
+		app.addAction(&m_redo_action);
+		app.addAction(&m_delete_action);
+		app.addAction(&m_apply_action);
+		app.addAction(&m_save_action);
+
+		newGraph();
+	}
+
+	~ProceduralGeomGeneratorPlugin(){
+		m_app.removeAction(&m_toggle_ui);
+		m_app.removeAction(&m_undo_action);
+		m_app.removeAction(&m_redo_action);
+		m_app.removeAction(&m_delete_action);
+		m_app.removeAction(&m_apply_action);
+		m_app.removeAction(&m_save_action);
+		if (m_resource) LUMIX_DELETE(m_allocator, m_resource);
+	}
+
+	void pushUndo(u32 tag) override {
+		if (m_autoapply) apply();
+	}
+
+	void onCanvasClicked(ImVec2 pos, i32 hovered_link) override {
+		for (const auto& t : TYPES) {
+			if (t.key && os::isKeyDown((os::Keycode)t.key)) {
+				Node* node = addNode(t.type, pos, false);
+				if (hovered_link >= 0) splitLink(m_resource->m_nodes.back(), m_resource->m_links, hovered_link);
+				pushUndo(NO_MERGE_UNDO);
+				break;
+			}
+		}
+	}
+
+	void onLinkDoubleClicked(Link& link, ImVec2 pos) override {}
+
+	void onContextMenu(ImVec2 pos) override {
+		Node* new_node = nullptr;
+		for (const auto& t : TYPES) {
+			if (ImGui::MenuItem(t.label)) new_node = addNode(t.type, pos, true);
+		}
+	}
+
+	void deserialize(InputMemoryStream& blob) override {
+		LUMIX_DELETE(m_allocator, m_resource);
+		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
+		m_resource->deserialize(blob, "");
+	}
+	
+	void serialize(OutputMemoryStream& blob) override {
+		m_resource->serialize(blob);
+	}
+
+	void deleteSelectedNodes() {
+		if (m_is_any_item_active) return;
+		m_resource->deleteSelectedNodes();
+		pushUndo(NO_MERGE_UNDO);
+	}
+
+	bool isOpen() const { return m_is_open; }
+	void toggleOpen() { m_is_open = !m_is_open; }
+	bool hasFocus() override { return m_has_focus; }
+
+	void open(const char* path) {
+		FileSystem& fs = m_app.getEngine().getFileSystem();
+		OutputMemoryStream data(m_allocator);
+		if (!fs.getContentSync(Path(path), data)) {
+			logError("Failed to load ", path);
+			return;
+		}
+
+		clear();
+
+		InputMemoryStream blob(data);
+		m_resource->deserialize(blob, path);
+
+		m_path = path;
+		pushRecent(path);
+		pushUndo(NO_MERGE_UNDO);
+	}
+
+	void pushRecent(const char* path) {
+		String p(path, m_app.getAllocator());
+		m_recent_paths.eraseItems([&](const String& s) { return s == path; });
+		m_recent_paths.push(static_cast<String&&>(p));
+	}
+
+	void clear() {
+		LUMIX_DELETE(m_allocator, m_resource);
+		m_resource = LUMIX_NEW(m_allocator, EditorResource)(m_app, m_allocator);
+		clearUndoStack();
+	}
+
+	void save() {
+		if (m_path.length() == 0) m_show_save_as = true;
+		else saveAs(m_path.c_str());
+	}
+
+	void saveAs(const char* path) {
+		FileSystem& fs = m_app.getEngine().getFileSystem();
+		
+		OutputMemoryStream blob(m_allocator);
+		m_resource->serialize(blob);
+
+		if (!fs.saveContentSync(Path(path), blob)) {
+			logError("Could not save ", path);
+			return;
+		}
+
+		m_path = path;
+		pushRecent(path);
+	}
+
+	void onSettingsLoaded() override {
+		Settings& settings = m_app.getSettings();
+		m_is_open = settings.getValue(Settings::GLOBAL, "is_procedural_geom_editor_open", false);
+		char tmp[LUMIX_MAX_PATH];
+		m_recent_paths.clear();
+		for (u32 i = 0; ; ++i) {
+			const StaticString<32> key("procedural_geom_editor_recent_", i);
+			const u32 len = settings.getValue(Settings::LOCAL, key, Span(tmp));
+			if (len == 0) break;
+			m_recent_paths.emplace(tmp, m_app.getAllocator());
+		}
+	}
+
+	void onBeforeSettingsSaved() override {
+		Settings& settings = m_app.getSettings();
+		settings.setValue(Settings::GLOBAL, "is_procedural_geom_editor_open", m_is_open);
+		for (const String& p : m_recent_paths) {
+			const u32 i = u32(&p - m_recent_paths.begin());	
+			const StaticString<32> key("procedural_geom_editor_recent_", i);
+			settings.setValue(Settings::LOCAL, key, p.c_str());
+		}
+	}
+
+	void newGraph() {
+		clear();
+		m_path = "";
+		addNode(NodeType::OUTPUT, ImVec2(100, 100), false);
+		pushUndo(NO_MERGE_UNDO);
+	}
+
+	void onWindowGUI() override {
+		m_has_focus = false;
+		if (!m_is_open) return;
+
+		ImGui::SetNextWindowSize(ImVec2(200, 200), ImGuiCond_FirstUseEver);
+		if (ImGui::Begin("Procedural geometry", &m_is_open, ImGuiWindowFlags_MenuBar)) {
+			m_has_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+			if (ImGui::BeginMenuBar()) {
+				if (ImGui::BeginMenu("File")) {
+					if (ImGui::MenuItem("New")) newGraph();
+					if (ImGui::MenuItem("Open")) m_show_open = true;
+					menuItem(m_save_action, true);
+					if (ImGui::MenuItem("Save As")) m_show_save_as = true;
+					menuItem(m_apply_action, canApply());
+					ImGui::MenuItem("Autoapply", nullptr, &m_autoapply);
+					if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
+						for (const String& path : m_recent_paths) {
+							if (ImGui::MenuItem(path.c_str())) open(path.c_str());
+						}
+						ImGui::EndMenu();
+					}
+					ImGui::EndMenu();
+				}
+				if (ImGui::BeginMenu("Edit")) {
+					menuItem(m_undo_action, canUndo());
+					menuItem(m_redo_action, canRedo());
+					ImGui::EndMenu();
+				}
+				ImGui::EndMenuBar();
+			}
+
+			FileSelector& fs = m_app.getFileSelector();
+			if (fs.gui("Open", &m_show_open, "pgm", false)) open(fs.getPath());
+			if (fs.gui("Save As", &m_show_save_as, "pgm", true)) saveAs(fs.getPath());
+
+			Span span(m_resource->m_material.beginUpdate(), m_resource->m_material.capacity());
+			m_app.getAssetBrowser().resourceInput("material", span, Material::TYPE);
+			m_resource->m_material.endUpdate();	
+
+			nodeEditorGUI(m_resource->m_nodes, m_resource->m_links);
+		}
+		ImGui::End();
+	}
+	
+
+	bool canApply() {
+		return m_resource->m_material.length() != 0 && !m_app.getWorldEditor().getSelectedEntities().empty();
+	}
+
+	void apply();
+	Node* addNode(NodeType type, ImVec2 pos, bool save_undo);
+
+	const char* getName() const override { return "procedural_geom_generator"; }
+	
+	IAllocator& m_allocator;
+	StudioApp& m_app;
+	bool m_is_open = true;
+	Array<String> m_recent_paths;
+	bool m_autoapply = false;
+	bool m_has_focus = false;
+	Action m_toggle_ui;
+	Action m_delete_action;
+	Action m_undo_action;
+	Action m_redo_action;
+	Action m_apply_action;
+	Action m_save_action;
+	Path m_path;
+	EditorResource* m_resource = nullptr;
+	bool m_show_save_as = false;
+	bool m_show_open = false;
+};
+
+template <typename F>
+static void	forEachInput(const EditorResource& resource, int node_id, const F& f) {
+	for (const Link& link : resource.m_links) {
+		if (toNodeId(link.to) == node_id) {
+			const int iter = resource.m_nodes.find([&](const Node* node) { return node->m_id == toNodeId(link.from); }); 
+			Node* from = resource.m_nodes[iter];
+			const u16 from_attr = toAttrIdx(link.from);
+			const u16 to_attr = toAttrIdx(link.to);
+			f(from, from_attr, to_attr, u32(&link - resource.m_links.begin()));
+		}
+	}
+}
+
+bool GeometryInput::getGeometry(Geometry* result) const { return node->getGeometry(output_idx, result); }
+
+ValueInput Node::getInputValue(u16 input_idx) const {
+	ValueInput res;
+	forEachInput(*m_resource, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
+		if (to_attr == input_idx && from->isValueNode()) {
+			res.output_idx = from_attr;
+			res.node = static_cast<ValueNode*>(from);
+		}
+	});
+	return res;
+}
+
+bool Node::getInputGeometry(u16 input_idx, Geometry* geometry) const {
+	const GeometryInput input = getGeometryInput(input_idx);
+	if (!input) return false;
+	return input.getGeometry(geometry);
+}
+
+GeometryInput Node::getGeometryInput(u16 input_idx) const {
+	GeometryInput res;
+	forEachInput(*m_resource, m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
+		if (to_attr == input_idx && !from->isValueNode()) {
+			res.output_idx = from_attr;
+			res.node = static_cast<GeometryNode*>(from);
+		}
+	});
+	return res;
+}
 
 void ProceduralGeomGeneratorPlugin::apply() {	
 	const Array<EntityRef>& selected = m_app.getWorldEditor().getSelectedEntities();
