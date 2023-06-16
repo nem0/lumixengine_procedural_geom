@@ -67,7 +67,8 @@ enum class NodeType : u32 {
 	SPLIT_VEC3,
 	MAKE_VEC3,
 	POSITION,
-	RANDOM
+	RANDOM,
+	NOISE
 };
 
 struct Geometry {
@@ -315,6 +316,7 @@ static const struct {
 	{ 'M', "Merge", NodeType::MERGE },
 	{ 0, "Math", NodeType::MATH },
 	{ 0, "Model", NodeType::MODEL },
+	{ 0, "Noise", NodeType::NOISE },
 	{ 0, "Random", NodeType::RANDOM },
 	{ 'I', "Place instances at points", NodeType::PLACE_INSTANCES_AT_POINTS },
 	{ 'P', "Point", NodeType::POINT },
@@ -1450,6 +1452,87 @@ struct GridNode : GeometryNode {
 	i32 m_rows = 10;
 };
 
+struct NoiseNode : ValueNode {
+	NodeType getType() const override { return NodeType::NOISE; }
+	bool hasInputPins() const override { return false; }
+	bool hasOutputPins() const override { return true; }
+	
+	void serialize(OutputMemoryStream& blob) const override {
+		blob.write(m_magic);
+		blob.write(m_scale);
+		blob.write(m_offset);
+		blob.write(m_amplitude);
+	}
+	
+	void deserialize(InputMemoryStream& blob) override {
+		blob.read(m_magic);
+		blob.read(m_scale);
+		blob.read(m_offset);
+		blob.read(m_amplitude);
+	}
+	
+	static Vec2 hash(Vec2 p) {
+		p = Vec2(dot(p, Vec2(127.1f, 311.7f)), dot(p, Vec2(269.5f, 183.3f)));
+		return fract(sin(p) * 18.5453f);
+	}
+
+	static Vec2 floor(Vec2 p) { return { floorf(p.x), floorf(p.y) }; }
+	static Vec2 sin(Vec2 p) { return { sinf(p.x), sinf(p.y) }; }
+	static Vec2 fract(Vec2 p) { return p - floor(p); }
+	static float mix(float a, float b, float t) { return a * (1 - t) + b * t; }
+	
+	// https://www.shadertoy.com/view/tldSRj
+	float noise(Vec2 p) const {
+		p = p * m_scale + Vec2(m_offset);
+		const float kF = m_magic;
+
+		Vec2 i = floor(p);
+		Vec2 f = fract(p);
+		f = f * f * (f * -2.f + 3.f);
+		return m_amplitude * mix(mix(sinf(kF * dot(p, hash(i + Vec2(0.f, 0.f)))),
+		               sinf(kF * dot(p, hash(i + Vec2(1.f, 0.f)))), f.x),
+		               mix(sinf(kF * dot(p, hash(i + Vec2(0.f, 1.f)))),
+		                   sinf(kF * dot(p, hash(i + Vec2(1.f, 1.f)))), f.x), f.y);
+	}
+
+	Result getResult(u16 output_idx, const Context& ctx) const override { 
+		ValueInput input = getInputValue(0);
+		if (input) {
+			Result in = input.getResult(ctx);
+			switch (in.type) {
+				case ValueNode::Result::INVALID: break;
+				case ValueNode::Result::FLOAT:
+					return Result(noise(Vec2(in.f_value)));
+				case ValueNode::Result::VEC3:
+					return Result(noise(in.vec3_value.xy()));
+				case ValueNode::Result::I32:
+					return Result(noise(Vec2((float)in.i32_value)));
+			}
+		}
+
+		if (!ctx.vertex) return Result();
+
+		return Result(noise(ctx.vertex->position.xy()));
+	}
+	
+	bool gui() override {
+		ImGuiEx::NodeTitle("Noise");
+		outputSlot();
+		inputSlot();
+		ImGui::TextUnformatted("Input vector");
+		bool res = ImGui::DragFloat("Magic", &m_magic);
+		res = ImGui::DragFloat("Scale", &m_scale) || res;
+		res = ImGui::DragFloat("Offset", &m_offset) || res;
+		res = ImGui::DragFloat("Amplitude", &m_amplitude) || res;
+		return res;
+	}
+
+	float m_magic = 6.f;
+	float m_scale = 1.f;
+	float m_offset = 0.f;
+	float m_amplitude = 1.f;
+};
+
 struct MakeVec3Node : ValueNode {
 	NodeType getType() const override { return NodeType::MAKE_VEC3; }
 	bool hasInputPins() const override { return true; }
@@ -1470,8 +1553,8 @@ struct MakeVec3Node : ValueNode {
 
 	Result getResult(u16 output_idx, const Context& ctx) const override {
 		const ValueInput iX = getInputValue(0);
-		const ValueInput iY = getInputValue(0);
-		const ValueInput iZ = getInputValue(0);
+		const ValueInput iY = getInputValue(1);
+		const ValueInput iZ = getInputValue(2);
 		
 		float x = toFloat(iX, ctx);
 		float y = toFloat(iY, ctx);
@@ -1579,10 +1662,8 @@ struct MathNode : ValueNode {
 	NodeType getType() const override { return NodeType::MATH; }
 	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
-	void serialize(OutputMemoryStream& blob) const override {}
-	void deserialize(InputMemoryStream& blob) override {}
-	
-
+	void serialize(OutputMemoryStream& blob) const override { blob.write(m_operator); }
+	void deserialize(InputMemoryStream& blob) override { blob.read(m_operator); }
 	
 	template <typename T0, typename T1> Result op(T0 v0, T1 v1) const { 
 		switch (m_operator) {
@@ -1591,7 +1672,6 @@ struct MathNode : ValueNode {
 		}
 		return {};
 	}
-
 
 	Result getResult(u16 output_idx, const Context& ctx) const override {
 		const ValueInput i0 = getInputValue(0);
@@ -2195,6 +2275,7 @@ Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 		case NodeType::INSTANTIATE_PREFAB: node = LUMIX_NEW(m_allocator, InstantiatePrefabNode); break;
 		case NodeType::LINE: node = LUMIX_NEW(m_allocator, LineNode); break;
 		case NodeType::MAKE_VEC3: node = LUMIX_NEW(m_allocator, MakeVec3Node); break;
+		case NodeType::NOISE: node = LUMIX_NEW(m_allocator, NoiseNode); break;
 		case NodeType::MERGE: node = LUMIX_NEW(m_allocator, MergeNode); break;
 		case NodeType::MODEL: node = LUMIX_NEW(m_allocator, ModelNode); break;
 		case NodeType::MATH: node = LUMIX_NEW(m_allocator, MathNode); break;
