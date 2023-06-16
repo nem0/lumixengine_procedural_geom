@@ -1728,7 +1728,7 @@ struct MathNode : ValueNode {
 		MULTIPLY
 	};
 
-	Operator m_operator;
+	Operator m_operator = MULTIPLY;
 };
 
 struct SetPositionNode : GeometryNode {
@@ -1741,18 +1741,24 @@ struct SetPositionNode : GeometryNode {
 	bool getGeometry(u16 output_idx, Geometry* result) override {
 		if (!getInputGeometry(0, result)) return false;
 		
-		const ValueInput value = getInputValue(1);
-		if (!value) return false;
+		const ValueInput abs_val = getInputValue(1);
+		const ValueInput rel_val = getInputValue(2);
+		if (!abs_val && !rel_val) return false;
 		
 		ValueNode::Context ctx;
 		for (Geometry::Vertex& v : result->vertices) {
 			ctx.index = u32(&v - result->vertices.begin());
 			ctx.vertex = &v;
-			const ValueNode::Result value_res = value.getResult(ctx);
-			if (!value_res.isValid()) return false;
-			if (value_res.type != ValueNode::Result::VEC3) return false;
-
-			v.position = value_res.vec3_value;
+			if (abs_val) {
+				const ValueNode::Result value_res = abs_val.getResult(ctx);
+				if (!value_res.isValid()) return false;
+				if (value_res.type != ValueNode::Result::VEC3) return false;
+				v.position = value_res.vec3_value;
+			}
+			if (rel_val) {
+				const ValueNode::Result value_res = rel_val.getResult(ctx);
+				v.position += value_res.vec3_value;
+			}
 		}
 
 		return true;
@@ -1765,6 +1771,8 @@ struct SetPositionNode : GeometryNode {
 		ImGui::TextUnformatted("Geometry");
 		inputSlot();
 		ImGui::TextUnformatted("Position");
+		inputSlot();
+		ImGui::TextUnformatted("Offset");
 		return false;
 	}
 };
