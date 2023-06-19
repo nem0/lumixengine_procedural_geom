@@ -1981,6 +1981,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 
 	void pushUndo(u32 tag) override {
 		if (m_autoapply) apply();
+		SimpleUndoRedo::pushUndo(tag);
 	}
 
 	void onCanvasClicked(ImVec2 pos, i32 hovered_link) override {
