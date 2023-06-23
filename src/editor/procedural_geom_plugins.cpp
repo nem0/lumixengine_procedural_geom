@@ -176,10 +176,16 @@ struct Node : NodeEditorNode {
 		if (m_error.length() > 0) {
 			ImGui::PushStyleColor(ImGuiCol_Border, IM_COL32(0xff, 0, 0, 0xff));
 		}
+		else if (!m_reachable) {
+			ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetColorU32(ImGuiCol_TitleBg));
+		}
 		ImGuiEx::EndNode();
 		if (m_error.length() > 0) {
 			ImGui::PopStyleColor();
 			if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", m_error.c_str());
+		}
+		else if (!m_reachable) {
+			ImGui::PopStyleColor();
 		}
 		
 		return res;
@@ -210,6 +216,7 @@ struct Node : NodeEditorNode {
 	EditorResource& m_resource;
 	IAllocator& m_allocator;
 	bool m_selected = false;
+	bool m_reachable = false;
 	u16 m_input_counter = 0;
 	u16 m_output_counter = 0;
 	String m_error;
@@ -251,9 +258,10 @@ struct EditorResource {
 	}
 
 	void deleteSelectedNodes() {
-		for (i32 i = m_nodes.size() - 1; i >= 0; --i) {
+		// m_nodes[0] is output, it can not be deleted
+		for (i32 i = m_nodes.size() - 1; i > 0; --i) {
 			Node* node = m_nodes[i];
-			if (node->m_selected && i != 0) {
+			if (node->m_selected) {
 				for (i32 j = m_links.size() - 1; j >= 0; --j) {
 					if (m_links[j].getFromNode() == node->m_id || m_links[j].getToNode() == node->m_id) {
 						m_links.erase(j);
@@ -264,6 +272,30 @@ struct EditorResource {
 				m_nodes.swapAndPop(i);
 			}
 		}
+	}
+
+	void markReachable(Node& n);
+
+	void deleteUnreachable() {
+		markReachableNodes();
+		for (i32 i = m_nodes.size() - 1; i > 0; --i) {
+			Node* node = m_nodes[i];
+			if (!node->m_reachable) {
+				for (i32 j = m_links.size() - 1; j >= 0; --j) {
+					if (m_links[j].getFromNode() == node->m_id || m_links[j].getToNode() == node->m_id) {
+						m_links.erase(j);
+					}
+				}
+
+				LUMIX_DELETE(m_allocator, node);
+				m_nodes.swapAndPop(i);
+			}
+		}
+	}
+
+	void markReachableNodes() {
+		for (Node* n : m_nodes) n->m_reachable = false;
+		markReachable(*m_nodes[0]);
 	}
 
 	void serialize(OutputMemoryStream& blob) {
@@ -337,18 +369,18 @@ static const struct {
 	{ 0, "Instantiate prefab", NodeType::INSTANTIATE_PREFAB },
 	{ 'I', "Index", NodeType::INDEX },
 	{ 'L', "Line", NodeType::LINE },
-	{ 0, "Make vector3", NodeType::MAKE_VEC3 },
+	{ '3', "Make vector3", NodeType::MAKE_VEC3 },
 	{ 0, "Map range", NodeType::MAP_RANGE },
-	{ 'M', "Merge", NodeType::MERGE },
-	{ 0, "Math", NodeType::MATH },
-	{ 0, "Mix", NodeType::MIX },
+	{ 'A', "Merge", NodeType::MERGE },
+	{ 'M', "Math", NodeType::MATH },
+	{ 'X', "Mix", NodeType::MIX },
 	{ 0, "Model", NodeType::MODEL },
 	{ 'N', "Noise", NodeType::NOISE },
 	{ 0, "Normal", NodeType::NORMAL },
 	{ 0, "Random", NodeType::RANDOM },
 	{ 'I', "Place instances at points", NodeType::PLACE_INSTANCES_AT_POINTS },
-	{ 'P', "Point", NodeType::POINT },
-	{ 0, "Position", NodeType::POSITION },
+	{ 0, "Point", NodeType::POINT },
+	{ 'P', "Position", NodeType::POSITION },
 	{ 'R', "Rotate points", NodeType::ROTATE_POINTS },
 	{ 0, "Scale", NodeType::SCALE },
 	{ 0, "Set normal", NodeType::SET_NORMAL },
@@ -357,7 +389,7 @@ static const struct {
 	{ 0, "Sphere", NodeType::SPHERE },
 	{ 'Q', "Spiral", NodeType::SPIRAL},
 	{ 'S', "Spline", NodeType::SPLINE },
-	{ 0, "Split vector3", NodeType::SPLIT_VEC3 },
+	{ 'V', "Split vector3", NodeType::SPLIT_VEC3 },
 	{ 'T', "Transform", NodeType::TRANSFORM },
 };
 
@@ -2541,6 +2573,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	void pushUndo(u32 tag) override {
 		if (m_autoapply) apply();
 		colorLinks();
+		m_resource->markReachableNodes();
 		SimpleUndoRedo::pushUndo(tag);
 	}
 
@@ -2690,6 +2723,11 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		pushUndo(NO_MERGE_UNDO);
 	}
 
+	void deleteUnreachable() {
+		m_resource->deleteUnreachable();
+		pushUndo(NO_MERGE_UNDO);
+	}
+
 	void onWindowGUI() override {
 		m_has_focus = false;
 		if (!m_is_open) return;
@@ -2716,6 +2754,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 				if (ImGui::BeginMenu("Edit")) {
 					menuItem(m_undo_action, canUndo());
 					menuItem(m_redo_action, canRedo());
+					if (ImGui::MenuItem(ICON_FA_BRUSH "Clean")) deleteUnreachable();
 					ImGui::EndMenu();
 				}
 				ImGui::EndMenuBar();
@@ -2810,7 +2849,7 @@ Node::Node(EditorResource& resource)
 	, m_allocator(resource.m_allocator)
 {}
 
-void ProceduralGeomGeneratorPlugin::apply() {	
+void ProceduralGeomGeneratorPlugin::apply() {
 	const Array<EntityRef>& selected = m_app.getWorldEditor().getSelectedEntities();
 	if (selected.size() != 1) return;
 	
@@ -2863,6 +2902,14 @@ void ProceduralGeomGeneratorPlugin::apply() {
 	module->setProceduralGeometryMaterial(selected[0], Path(m_resource->m_material));
 
 }
+
+void EditorResource::markReachable(Node& n) {
+	n.m_reachable = true;
+	forEachInput(*this, n.m_id, [&](Node* from, u16 from_attr, u16 to_attr, u32 link_idx){
+		markReachable(*from);
+	});
+} 
+
 
 Node* EditorResource::createNode(NodeType type, ImVec2 pos) {
 	Node* node;
