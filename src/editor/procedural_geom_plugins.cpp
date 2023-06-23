@@ -253,7 +253,7 @@ struct EditorResource {
 	void deleteSelectedNodes() {
 		for (i32 i = m_nodes.size() - 1; i >= 0; --i) {
 			Node* node = m_nodes[i];
-			if (node->m_selected) {
+			if (node->m_selected && i != 0) {
 				for (i32 j = m_links.size() - 1; j >= 0; --j) {
 					if (m_links[j].getFromNode() == node->m_id || m_links[j].getToNode() == node->m_id) {
 						m_links.erase(j);
@@ -2443,7 +2443,7 @@ struct OutputNode : Node {
 	Result eval(u16 output_idx, const Context& ctx) override {
 		if (!ctx.geometry) return error("Invalid context");
 
-		if (!getInputGeometry(0, *ctx.geometry)) return {};
+		if (!getInputGeometry(0, *ctx.geometry)) return error("Invalid input");
 
 		return Result::geom();
 	}
@@ -2569,10 +2569,15 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		Node* new_node = nullptr;
 		static char filter[64] = "";
 		if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
-		ImGui::SetNextItemWidth(150);
+		ImGui::SetNextItemWidth(200);
 		ImGui::InputTextWithHint("##filter", "Filter", filter, sizeof(filter), ImGuiInputTextFlags_AutoSelectAll);
 		for (const auto& t : TYPES) {
-			if ((!filter[0] || stristr(t.label, filter)) && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::MenuItem(t.label))) {
+			StaticString<64> label(t.label);
+			if (t.key) {
+				label.append(" (LMB + ", t.key, ")");
+			}
+
+			if ((!filter[0] || stristr(t.label, filter)) && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::MenuItem(label))) {
 				new_node = addNode(t.type, pos, true);
 				filter[0] = '\0';
 				ImGui::CloseCurrentPopup();
