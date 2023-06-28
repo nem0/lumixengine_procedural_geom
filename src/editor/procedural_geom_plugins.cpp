@@ -1794,7 +1794,7 @@ struct NoiseNode : Node {
 	NoiseNode(EditorResource& resource) : Node(resource) {}
 
 	NodeType getType() const override { return NodeType::NOISE; }
-	bool hasInputPins() const override { return false; }
+	bool hasInputPins() const override { return true; }
 	bool hasOutputPins() const override { return true; }
 	
 	void serialize(OutputMemoryStream& blob) const override {
