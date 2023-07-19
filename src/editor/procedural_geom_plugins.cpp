@@ -2509,50 +2509,36 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		, NodeEditor(app.getAllocator())
 	{
 		m_delete_action.init(ICON_FA_TRASH "Delete", "Procedural geometry editor delete", "proc_geom_editor_delete", ICON_FA_TRASH, os::Keycode::DEL, Action::Modifiers::NONE, true);
-		m_delete_action.func.bind<&ProceduralGeomGeneratorPlugin::deleteSelectedNodes>(this);
-		m_delete_action.plugin = this;
-
-		m_undo_action.init(ICON_FA_UNDO "Undo", "Procedural geometry editor undo", "proc_geom_editor_undo", ICON_FA_UNDO, os::Keycode::Z, Action::Modifiers::CTRL, true);
-		m_undo_action.func.bind<&ProceduralGeomGeneratorPlugin::undo>((SimpleUndoRedo*)this);
-		m_undo_action.plugin = this;
-
-		m_redo_action.init(ICON_FA_REDO "Redo", "Procedural geometry editor redo", "proc_geom_editor_redo", ICON_FA_REDO, os::Keycode::Z, Action::Modifiers::CTRL | Action::Modifiers::SHIFT, true);
-		m_redo_action.func.bind<&ProceduralGeomGeneratorPlugin::redo>((SimpleUndoRedo*)this);
-		m_redo_action.plugin = this;
-
 		m_apply_action.init("Apply", "Procedural geometry editor apply", "proc_geom_editor_apply", ICON_FA_CHECK, os::Keycode::E, Action::Modifiers::CTRL, true);
-		m_apply_action.func.bind<&ProceduralGeomGeneratorPlugin::apply>(this);
-		m_apply_action.plugin = this;
-
-		m_save_action.init(ICON_FA_SAVE "Save", "Procedural geometry editor save", "proc_geom_editor_save", ICON_FA_SAVE, os::Keycode::S, Action::Modifiers::CTRL, true);
-		m_save_action.func.bind<&ProceduralGeomGeneratorPlugin::save>(this);
-		m_save_action.plugin = this;
 
 		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", true);
 		m_toggle_ui.func.bind<&ProceduralGeomGeneratorPlugin::toggleOpen>(this);
 		m_toggle_ui.is_selected.bind<&ProceduralGeomGeneratorPlugin::isOpen>(this);
 		
 		app.addWindowAction(&m_toggle_ui);
-		app.addAction(&m_undo_action);
-		app.addAction(&m_redo_action);
 		app.addAction(&m_delete_action);
 		app.addAction(&m_apply_action);
-		app.addAction(&m_save_action);
 
 		newGraph();
 	}
 
 	~ProceduralGeomGeneratorPlugin(){
 		m_app.removeAction(&m_toggle_ui);
-		m_app.removeAction(&m_undo_action);
-		m_app.removeAction(&m_redo_action);
 		m_app.removeAction(&m_delete_action);
 		m_app.removeAction(&m_apply_action);
-		m_app.removeAction(&m_save_action);
 		if (m_resource) LUMIX_DELETE(m_allocator, m_resource);
 	}
 
-	
+	bool onAction(const Action& action) override {
+		if (&action == &m_delete_action) deleteSelectedNodes();
+		else if (&action == &m_apply_action) apply();
+		else if (&action == &m_app.getSaveAction()) save();
+		else if (&action == &m_app.getUndoAction()) undo();
+		else if (&action == &m_app.getRedoAction()) redo();
+		else return false;
+		return true;
+	}
+
 	void colorLinks() {
 		const ImU32 colors[] = {
 			IM_COL32(0x20, 0x20, 0xA0, 0xFF),
@@ -2641,7 +2627,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 
 	bool isOpen() const { return m_is_open; }
 	void toggleOpen() { m_is_open = !m_is_open; }
-	bool hasFocus() override { return m_has_focus; }
+	bool hasFocus() const override { return m_has_focus; }
 
 	void open(const char* path) {
 		FileSystem& fs = m_app.getEngine().getFileSystem();
@@ -2728,7 +2714,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		pushUndo(NO_MERGE_UNDO);
 	}
 
-	void onWindowGUI() override {
+	void onGUI() override {
 		m_has_focus = false;
 		if (!m_is_open) return;
 
@@ -2739,7 +2725,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 				if (ImGui::BeginMenu("File")) {
 					if (ImGui::MenuItem("New")) newGraph();
 					if (ImGui::MenuItem("Open")) m_show_open = true;
-					menuItem(m_save_action, true);
+					menuItem(m_app.getSaveAction(), true);
 					if (ImGui::MenuItem("Save As")) m_show_save_as = true;
 					menuItem(m_apply_action, canApply());
 					ImGui::MenuItem("Autoapply", nullptr, &m_autoapply);
@@ -2752,8 +2738,8 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 					ImGui::EndMenu();
 				}
 				if (ImGui::BeginMenu("Edit")) {
-					menuItem(m_undo_action, canUndo());
-					menuItem(m_redo_action, canRedo());
+					menuItem(m_app.getUndoAction(), canUndo());
+					menuItem(m_app.getRedoAction(), canRedo());
 					if (ImGui::MenuItem(ICON_FA_BRUSH "Clean")) deleteUnreachable();
 					ImGui::EndMenu();
 				}
@@ -2791,10 +2777,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	bool m_has_focus = false;
 	Action m_toggle_ui;
 	Action m_delete_action;
-	Action m_undo_action;
-	Action m_redo_action;
 	Action m_apply_action;
-	Action m_save_action;
 	Path m_path;
 	EditorResource* m_resource = nullptr;
 	bool m_show_save_as = false;
