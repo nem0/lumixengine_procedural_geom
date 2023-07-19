@@ -2508,7 +2508,6 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		, m_recent_paths(app.getAllocator())
 		, NodeEditor(app.getAllocator())
 	{
-		m_delete_action.init(ICON_FA_TRASH "Delete", "Procedural geometry editor delete", "proc_geom_editor_delete", ICON_FA_TRASH, os::Keycode::DEL, Action::Modifiers::NONE, true);
 		m_apply_action.init("Apply", "Procedural geometry editor apply", "proc_geom_editor_apply", ICON_FA_CHECK, os::Keycode::E, Action::Modifiers::CTRL, true);
 
 		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", true);
@@ -2516,7 +2515,6 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		m_toggle_ui.is_selected.bind<&ProceduralGeomGeneratorPlugin::isOpen>(this);
 		
 		app.addWindowAction(&m_toggle_ui);
-		app.addAction(&m_delete_action);
 		app.addAction(&m_apply_action);
 
 		newGraph();
@@ -2524,13 +2522,12 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 
 	~ProceduralGeomGeneratorPlugin(){
 		m_app.removeAction(&m_toggle_ui);
-		m_app.removeAction(&m_delete_action);
 		m_app.removeAction(&m_apply_action);
 		if (m_resource) LUMIX_DELETE(m_allocator, m_resource);
 	}
 
 	bool onAction(const Action& action) override {
-		if (&action == &m_delete_action) deleteSelectedNodes();
+		if (&m_app.getDeleteAction() == &action) deleteSelectedNodes();
 		else if (&action == &m_apply_action) apply();
 		else if (&action == &m_app.getSaveAction()) save();
 		else if (&action == &m_app.getUndoAction()) undo();
@@ -2776,7 +2773,6 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	bool m_autoapply = false;
 	bool m_has_focus = false;
 	Action m_toggle_ui;
-	Action m_delete_action;
 	Action m_apply_action;
 	Path m_path;
 	EditorResource* m_resource = nullptr;
