@@ -2722,9 +2722,9 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 				if (ImGui::BeginMenu("File")) {
 					if (ImGui::MenuItem("New")) newGraph();
 					if (ImGui::MenuItem("Open")) m_show_open = true;
-					menuItem(m_app.getSaveAction(), true);
+					if (menuItem(m_app.getSaveAction(), true)) save();
 					if (ImGui::MenuItem("Save As")) m_show_save_as = true;
-					menuItem(m_apply_action, canApply());
+					if (menuItem(m_apply_action, canApply())) apply();
 					ImGui::MenuItem("Autoapply", nullptr, &m_autoapply);
 					if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
 						for (const String& path : m_recent_paths) {
@@ -2735,9 +2735,9 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 					ImGui::EndMenu();
 				}
 				if (ImGui::BeginMenu("Edit")) {
-					menuItem(m_app.getUndoAction(), canUndo());
-					menuItem(m_app.getRedoAction(), canRedo());
-					if (ImGui::MenuItem(ICON_FA_BRUSH "Clean")) deleteUnreachable();
+					if (menuItem(m_app.getUndoAction(), canUndo())) undo();
+					if (menuItem(m_app.getRedoAction(), canRedo())) redo();
+					if (ImGui::MenuItem(ICON_FA_BRUSH "Clear")) deleteUnreachable();
 					ImGui::EndMenu();
 				}
 				ImGui::EndMenuBar();
