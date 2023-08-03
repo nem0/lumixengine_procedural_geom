@@ -2527,11 +2527,12 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	}
 
 	bool onAction(const Action& action) override {
-		if (&m_app.getDeleteAction() == &action) deleteSelectedNodes();
+		const CommonActions& actions = m_app.getCommonActions();
+		if (&actions.del == &action) deleteSelectedNodes();
 		else if (&action == &m_apply_action) apply();
-		else if (&action == &m_app.getSaveAction()) save();
-		else if (&action == &m_app.getUndoAction()) undo();
-		else if (&action == &m_app.getRedoAction()) redo();
+		else if (&action == &actions.save) save();
+		else if (&action == &actions.undo) undo();
+		else if (&action == &actions.redo) redo();
 		else return false;
 		return true;
 	}
@@ -2719,10 +2720,11 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		if (ImGui::Begin("Procedural geometry", &m_is_open, ImGuiWindowFlags_MenuBar)) {
 			m_has_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
 			if (ImGui::BeginMenuBar()) {
+				const CommonActions& actions = m_app.getCommonActions();
 				if (ImGui::BeginMenu("File")) {
 					if (ImGui::MenuItem("New")) newGraph();
 					if (ImGui::MenuItem("Open")) m_show_open = true;
-					if (menuItem(m_app.getSaveAction(), true)) save();
+					if (menuItem(actions.save, true)) save();
 					if (ImGui::MenuItem("Save As")) m_show_save_as = true;
 					if (menuItem(m_apply_action, canApply())) apply();
 					ImGui::MenuItem("Autoapply", nullptr, &m_autoapply);
@@ -2735,8 +2737,8 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 					ImGui::EndMenu();
 				}
 				if (ImGui::BeginMenu("Edit")) {
-					if (menuItem(m_app.getUndoAction(), canUndo())) undo();
-					if (menuItem(m_app.getRedoAction(), canRedo())) redo();
+					if (menuItem(actions.undo, canUndo())) undo();
+					if (menuItem(actions.redo, canRedo())) redo();
 					if (ImGui::MenuItem(ICON_FA_BRUSH "Clear")) deleteUnreachable();
 					ImGui::EndMenu();
 				}
