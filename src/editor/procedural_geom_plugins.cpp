@@ -13,6 +13,7 @@
 #include "engine/log.h"
 #include "engine/os.h"
 #include "engine/prefab.h"
+#include "engine/profiler.h"
 #include "engine/resource_manager.h"
 #include "engine/string.h"
 #include "engine/world.h"
@@ -803,12 +804,11 @@ struct ModelNode : Node {
 	bool gui() override {
 		ImGuiEx::NodeTitle("Model");
 		outputSlot(Result::GEOMETRY);
-		char path[LUMIX_MAX_PATH];
-		copyString(path, m_model ? m_model->getPath().c_str() : "");
-		if (m_resource.m_app.getAssetBrowser().resourceInput("Asset", Span(path), Model::TYPE, 150)) {
+		Path path = m_model ? m_model->getPath() : Path();
+		if (m_resource.m_app.getAssetBrowser().resourceInput("Asset", path, Model::TYPE, 150)) {
 			if (m_model) m_model->decRefCount();
 			ResourceManagerHub& rm = m_resource.m_app.getEngine().getResourceManager();
-			m_model = rm.load<Model>(Path(path));
+			m_model = rm.load<Model>(path);
 			return true;
 		}
 		return false;
@@ -880,12 +880,11 @@ struct InstantiatePrefabNode : Node {
 		ImGuiEx::NodeTitle("Instantiate prefab");
 		inputSlot(Result::GEOMETRY);
 		ImGui::TextUnformatted("Points");
-		char path[LUMIX_MAX_PATH];
-		copyString(path, m_prefab ? m_prefab->getPath().c_str() : "");
+		Path path = m_prefab ? m_prefab->getPath() : Path();
 		ResourceManagerHub& rm = m_resource.m_app.getEngine().getResourceManager();
-		if (m_resource.m_app.getAssetBrowser().resourceInput("Prefab", Span(path), PrefabResource::TYPE, 150)) {
+		if (m_resource.m_app.getAssetBrowser().resourceInput("Prefab", path, PrefabResource::TYPE, 150)) {
 			if (m_prefab) m_prefab->decRefCount();
-			m_prefab = rm.load<PrefabResource>(Path(path));
+			m_prefab = rm.load<PrefabResource>(path);
 			return true;
 		}
 		if (ImGui::Button("Instantiate")) {
@@ -2749,8 +2748,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 			if (fs.gui("Open", &m_show_open, "pgm", false)) open(fs.getPath());
 			if (fs.gui("Save As", &m_show_save_as, "pgm", true)) saveAs(fs.getPath());
 
-			Span span(m_resource->m_material.beginUpdate(), m_resource->m_material.capacity());
-			m_app.getAssetBrowser().resourceInput("material", span, Material::TYPE);
+			m_app.getAssetBrowser().resourceInput("material", m_resource->m_material, Material::TYPE);
 			m_resource->m_material.endUpdate();	
 
 			nodeEditorGUI(m_resource->m_nodes, m_resource->m_links);
@@ -2947,6 +2945,7 @@ Node* ProceduralGeomGeneratorPlugin::addNode(NodeType type, ImVec2 pos, bool sav
 }
 
 LUMIX_STUDIO_ENTRY(procedural_geom) {
+	PROFILE_FUNCTION();
 	auto* plugin = LUMIX_NEW(app.getAllocator(), ProceduralGeomGeneratorPlugin)(app);
 	app.addPlugin(*plugin);
 	return nullptr;
