@@ -2593,7 +2593,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 				label.append(" (LMB + ", t.key, ")");
 			}
 
-			if ((!filter[0] || stristr(t.label, filter)) && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::MenuItem(label))) {
+			if ((!filter[0] || findInsensitive(t.label, filter)) && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::MenuItem(label))) {
 				new_node = addNode(t.type, pos, true);
 				filter[0] = '\0';
 				ImGui::CloseCurrentPopup();
@@ -2679,7 +2679,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	void onSettingsLoaded() override {
 		Settings& settings = m_app.getSettings();
 		m_is_open = settings.getValue(Settings::GLOBAL, "is_procedural_geom_editor_open", false);
-		char tmp[LUMIX_MAX_PATH];
+		char tmp[MAX_PATH];
 		m_recent_paths.clear();
 		for (u32 i = 0; ; ++i) {
 			const StaticString<32> key("procedural_geom_editor_recent_", i);
