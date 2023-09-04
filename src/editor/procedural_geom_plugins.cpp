@@ -2507,9 +2507,9 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		, m_recent_paths(app.getAllocator())
 		, NodeEditor(app.getAllocator())
 	{
-		m_apply_action.init("Apply", "Procedural geometry editor apply", "proc_geom_editor_apply", ICON_FA_CHECK, os::Keycode::E, Action::Modifiers::CTRL, true);
+		m_apply_action.init("Apply", "Procedural geometry editor apply", "proc_geom_editor_apply", ICON_FA_CHECK, os::Keycode::E, Action::Modifiers::CTRL, Action::IMGUI_PRIORITY);
 
-		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", true);
+		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", Action::IMGUI_PRIORITY);
 		m_toggle_ui.func.bind<&ProceduralGeomGeneratorPlugin::toggleOpen>(this);
 		m_toggle_ui.is_selected.bind<&ProceduralGeomGeneratorPlugin::isOpen>(this);
 		
