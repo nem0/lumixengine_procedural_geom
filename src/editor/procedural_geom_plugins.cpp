@@ -2862,13 +2862,13 @@ void ProceduralGeomGeneratorPlugin::apply() {
 	Span<const u8> vertices((const u8*)geom.vertices.begin(), (u32)geom.vertices.byte_size());
 	Span<const u8> indices((const u8*)geom.indices.begin(), (u32)geom.indices.byte_size());
 	gpu::VertexDecl decl(geom.type);
-	decl.addAttribute(0, 0, 3, gpu::AttributeType::FLOAT, 0);  // pos
-	decl.addAttribute(1, 12, 2, gpu::AttributeType::FLOAT, 0); // uv
-	decl.addAttribute(2, 20, 3, gpu::AttributeType::FLOAT, 0); // normal
-	decl.addAttribute(3, 32, 3, gpu::AttributeType::FLOAT, 0); // tangent
+	decl.addAttribute(0, 3, gpu::AttributeType::FLOAT, 0);  // pos
+	decl.addAttribute(12, 2, gpu::AttributeType::FLOAT, 0); // uv
+	decl.addAttribute(20, 3, gpu::AttributeType::FLOAT, 0); // normal
+	decl.addAttribute(32, 3, gpu::AttributeType::FLOAT, 0); // tangent
 	OutputMemoryStream user_vertices(m_allocator);
 	if (output->user_channels_count > 0) {
-		decl.addAttribute(4, 44, output->user_channels_count, gpu::AttributeType::U8, gpu::Attribute::NORMALIZED);
+		decl.addAttribute(44, output->user_channels_count, gpu::AttributeType::U8, gpu::Attribute::NORMALIZED);
 		user_vertices.reserve(geom.vertices.size() * (sizeof(Geometry::Vertex) + output->user_channels_count * sizeof(float))); 
 		for (u32 i = 0; i < (u32)geom.vertices.size(); ++i) {
 			user_vertices.write(geom.vertices[i]);
