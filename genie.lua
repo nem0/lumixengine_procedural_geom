@@ -7,7 +7,10 @@ project "procedural_geom"
 		"genie.lua"
 	}
 	defines { "BUILDING_PROCEDURAL_GEOM" }
-	links { "engine" }
+	links { "engine", "core", "renderer" }
+	if build_studio then
+		links { "editor" }
+	end
 	useLua()
 	defaultConfigurations()
 
