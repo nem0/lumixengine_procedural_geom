@@ -1,8 +1,10 @@
 #define LUMIX_NO_CUSTOM_CRT
+#include <string.h>
 #include "core/allocator.h"
 #include "core/array.h"
 #include "core/crt.h"
 #include "core/log.h"
+#include "core/math.h"
 #include "core/os.h"
 #include "core/profiler.h"
 #include "core/string.h"
