@@ -2506,7 +2506,6 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	ProceduralGeomGeneratorPlugin(StudioApp& app)
 		: m_app(app)
 		, m_allocator(app.getAllocator())
-		, m_recent_paths(app.getAllocator())
 		, NodeEditor(app.getAllocator())
 	{
 		m_apply_action.init("Apply", "Procedural geometry editor apply", "proc_geom_editor_apply", ICON_FA_CHECK, os::Keycode::E, Action::Modifiers::CTRL, Action::IMGUI_PRIORITY);
@@ -2517,7 +2516,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		
 		app.addWindowAction(&m_toggle_ui);
 		app.addAction(&m_apply_action);
-
+		app.getSettings().registerPtr("is_procedural_geom_editor_open", &m_is_open);
 		newGraph();
 	}
 
@@ -2642,14 +2641,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		m_resource->deserialize(blob, path);
 
 		m_path = path;
-		pushRecent(path);
 		pushUndo(NO_MERGE_UNDO);
-	}
-
-	void pushRecent(const char* path) {
-		String p(path, m_app.getAllocator());
-		m_recent_paths.eraseItems([&](const String& s) { return s == path; });
-		m_recent_paths.push(static_cast<String&&>(p));
 	}
 
 	void clear() {
@@ -2675,30 +2667,6 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		}
 
 		m_path = path;
-		pushRecent(path);
-	}
-
-	void onSettingsLoaded() override {
-		Settings& settings = m_app.getSettings();
-		m_is_open = settings.getValue(Settings::GLOBAL, "is_procedural_geom_editor_open", false);
-		char tmp[MAX_PATH];
-		m_recent_paths.clear();
-		for (u32 i = 0; ; ++i) {
-			const StaticString<32> key("procedural_geom_editor_recent_", i);
-			const u32 len = settings.getValue(Settings::LOCAL, key, Span(tmp));
-			if (len == 0) break;
-			m_recent_paths.emplace(tmp, m_app.getAllocator());
-		}
-	}
-
-	void onBeforeSettingsSaved() override {
-		Settings& settings = m_app.getSettings();
-		settings.setValue(Settings::GLOBAL, "is_procedural_geom_editor_open", m_is_open);
-		for (const String& p : m_recent_paths) {
-			const u32 i = u32(&p - m_recent_paths.begin());	
-			const StaticString<32> key("procedural_geom_editor_recent_", i);
-			settings.setValue(Settings::LOCAL, key, p.c_str());
-		}
 	}
 
 	void newGraph() {
@@ -2729,12 +2697,6 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 					if (ImGui::MenuItem("Save As")) m_show_save_as = true;
 					if (menuItem(m_apply_action, canApply())) apply();
 					ImGui::MenuItem("Autoapply", nullptr, &m_autoapply);
-					if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
-						for (const String& path : m_recent_paths) {
-							if (ImGui::MenuItem(path.c_str())) open(path.c_str());
-						}
-						ImGui::EndMenu();
-					}
 					ImGui::EndMenu();
 				}
 				if (ImGui::BeginMenu("Edit")) {
@@ -2771,7 +2733,6 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	IAllocator& m_allocator;
 	StudioApp& m_app;
 	bool m_is_open = true;
-	Array<String> m_recent_paths;
 	bool m_autoapply = false;
 	bool m_has_focus = false;
 	Action m_toggle_ui;
