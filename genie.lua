@@ -11,7 +11,6 @@ project "procedural_geom"
 	if build_studio then
 		links { "editor" }
 	end
-	useLua()
 	defaultConfigurations()
 
 linkPlugin("procedural_geom")
