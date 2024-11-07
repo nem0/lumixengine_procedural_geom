@@ -2506,36 +2506,14 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	ProceduralGeomGeneratorPlugin(StudioApp& app)
 		: m_app(app)
 		, m_allocator(app.getAllocator())
-		, m_recent_paths(app.getAllocator())
 		, NodeEditor(app.getAllocator())
 	{
-		m_apply_action.init("Apply", "Procedural geometry editor apply", "proc_geom_editor_apply", ICON_FA_CHECK, os::Keycode::E, Action::Modifiers::CTRL, Action::IMGUI_PRIORITY);
-
-		m_toggle_ui.init("Procedural editor", "Toggle procedural editor", "procedural_editor", "", Action::IMGUI_PRIORITY);
-		m_toggle_ui.func.bind<&ProceduralGeomGeneratorPlugin::toggleOpen>(this);
-		m_toggle_ui.is_selected.bind<&ProceduralGeomGeneratorPlugin::isOpen>(this);
-		
-		app.addWindowAction(&m_toggle_ui);
-		app.addAction(&m_apply_action);
-
 		newGraph();
+		m_app.getSettings().registerOption("procedural_geom_editor_open", &m_is_open);
 	}
 
 	~ProceduralGeomGeneratorPlugin(){
-		m_app.removeAction(&m_toggle_ui);
-		m_app.removeAction(&m_apply_action);
 		if (m_resource) LUMIX_DELETE(m_allocator, m_resource);
-	}
-
-	bool onAction(const Action& action) override {
-		const CommonActions& actions = m_app.getCommonActions();
-		if (&actions.del == &action) deleteSelectedNodes();
-		else if (&action == &m_apply_action) apply();
-		else if (&action == &actions.save) save();
-		else if (&action == &actions.undo) undo();
-		else if (&action == &actions.redo) redo();
-		else return false;
-		return true;
 	}
 
 	void colorLinks() {
@@ -2624,10 +2602,6 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		pushUndo(NO_MERGE_UNDO);
 	}
 
-	bool isOpen() const { return m_is_open; }
-	void toggleOpen() { m_is_open = !m_is_open; }
-	bool hasFocus() const override { return m_has_focus; }
-
 	void open(const char* path) {
 		FileSystem& fs = m_app.getEngine().getFileSystem();
 		OutputMemoryStream data(m_allocator);
@@ -2642,14 +2616,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		m_resource->deserialize(blob, path);
 
 		m_path = path;
-		pushRecent(path);
 		pushUndo(NO_MERGE_UNDO);
-	}
-
-	void pushRecent(const char* path) {
-		String p(path, m_app.getAllocator());
-		m_recent_paths.eraseItems([&](const String& s) { return s == path; });
-		m_recent_paths.push(static_cast<String&&>(p));
 	}
 
 	void clear() {
@@ -2675,31 +2642,8 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 		}
 
 		m_path = path;
-		pushRecent(path);
 	}
 
-	void onSettingsLoaded() override {
-		Settings& settings = m_app.getSettings();
-		m_is_open = settings.getValue(Settings::GLOBAL, "is_procedural_geom_editor_open", false);
-		char tmp[MAX_PATH];
-		m_recent_paths.clear();
-		for (u32 i = 0; ; ++i) {
-			const StaticString<32> key("procedural_geom_editor_recent_", i);
-			const u32 len = settings.getValue(Settings::LOCAL, key, Span(tmp));
-			if (len == 0) break;
-			m_recent_paths.emplace(tmp, m_app.getAllocator());
-		}
-	}
-
-	void onBeforeSettingsSaved() override {
-		Settings& settings = m_app.getSettings();
-		settings.setValue(Settings::GLOBAL, "is_procedural_geom_editor_open", m_is_open);
-		for (const String& p : m_recent_paths) {
-			const u32 i = u32(&p - m_recent_paths.begin());	
-			const StaticString<32> key("procedural_geom_editor_recent_", i);
-			settings.setValue(Settings::LOCAL, key, p.c_str());
-		}
-	}
 
 	void newGraph() {
 		clear();
@@ -2714,14 +2658,20 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	}
 
 	void onGUI() override {
-		m_has_focus = false;
+		if (m_app.checkShortcut(m_toggle_ui, true)) m_is_open = !m_is_open;
 		if (!m_is_open) return;
 
 		ImGui::SetNextWindowSize(ImVec2(200, 200), ImGuiCond_FirstUseEver);
 		if (ImGui::Begin("Procedural geometry", &m_is_open, ImGuiWindowFlags_MenuBar)) {
-			m_has_focus = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+
+			CommonActions& actions = m_app.getCommonActions();
+			if (m_app.checkShortcut(actions.del)) deleteSelectedNodes();
+			else if (m_app.checkShortcut(m_apply_action)) apply();
+			else if (m_app.checkShortcut(actions.save)) save();
+			else if (m_app.checkShortcut(actions.undo)) undo();
+			else if (m_app.checkShortcut(actions.redo)) redo();
+
 			if (ImGui::BeginMenuBar()) {
-				const CommonActions& actions = m_app.getCommonActions();
 				if (ImGui::BeginMenu("File")) {
 					if (ImGui::MenuItem("New")) newGraph();
 					if (ImGui::MenuItem("Open")) m_show_open = true;
@@ -2729,12 +2679,6 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 					if (ImGui::MenuItem("Save As")) m_show_save_as = true;
 					if (menuItem(m_apply_action, canApply())) apply();
 					ImGui::MenuItem("Autoapply", nullptr, &m_autoapply);
-					if (ImGui::BeginMenu("Recent", !m_recent_paths.empty())) {
-						for (const String& path : m_recent_paths) {
-							if (ImGui::MenuItem(path.c_str())) open(path.c_str());
-						}
-						ImGui::EndMenu();
-					}
 					ImGui::EndMenu();
 				}
 				if (ImGui::BeginMenu("Edit")) {
@@ -2770,12 +2714,10 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	
 	IAllocator& m_allocator;
 	StudioApp& m_app;
-	bool m_is_open = true;
-	Array<String> m_recent_paths;
+	bool m_is_open = false;
 	bool m_autoapply = false;
-	bool m_has_focus = false;
-	Action m_toggle_ui;
-	Action m_apply_action;
+	Action m_toggle_ui{"Procedural editor", "Procedural editor - toggle UI", "procedural_editor_toggle_ui", nullptr, Action::WINDOW};
+	Action m_apply_action{"Apply", "Procedural geometry - apply", "proc_geom_editor_apply", ICON_FA_CHECK};
 	Path m_path;
 	EditorResource* m_resource = nullptr;
 	bool m_show_save_as = false;
