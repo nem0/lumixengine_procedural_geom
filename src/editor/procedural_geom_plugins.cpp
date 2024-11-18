@@ -1939,10 +1939,9 @@ struct SnapToTerrainNode : Node {
 		
 		for (EntityPtr e = render_module->getFirstTerrain(); e.isValid(); e = render_module->getNextTerrain(*e)) {
 			const Terrain* terrain = render_module->getTerrain(*e);
-			const Transform& terrain_to_geom = ctx.geometry->to_world.inverted() * world->getTransform(*e);
-			const Transform& geom_to_terrain = terrain_to_geom.inverted();
+			const Transform& terrain_to_geom = Transform::computeLocal(ctx.geometry->to_world, world->getTransform(*e));
 			for (Geometry::Vertex& v : ctx.geometry->vertices) {
-				v.position = Vec3(geom_to_terrain.transform(v.position));
+				v.position = Vec3(terrain_to_geom.invTransform(v.position));
 				if (v.position.x >= 0 
 					&& v.position.x <= terrain->m_width * terrain->m_scale.x
 					&& v.position.y >= 0 
