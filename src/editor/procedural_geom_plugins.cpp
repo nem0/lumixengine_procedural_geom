@@ -2715,8 +2715,8 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	StudioApp& m_app;
 	bool m_is_open = false;
 	bool m_autoapply = false;
-	Action m_toggle_ui{"Procedural editor", "Procedural editor - toggle UI", "procedural_editor_toggle_ui", nullptr, Action::WINDOW};
-	Action m_apply_action{"Apply", "Procedural geometry - apply", "proc_geom_editor_apply", ICON_FA_CHECK};
+	Action m_toggle_ui{"Procedural editor", "Procedural editor", "Toggle UI", "procedural_editor_toggle_ui", nullptr, Action::WINDOW};
+	Action m_apply_action{"Procedural editor", "Apply", "Apply", "proc_geom_editor_apply", ICON_FA_CHECK};
 	Path m_path;
 	EditorResource* m_resource = nullptr;
 	bool m_show_save_as = false;
