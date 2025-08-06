@@ -1,5 +1,4 @@
-project "procedural_geom"
-	libType()
+if plugin "procedural_geom" then
 	files { 
 		"src/**.c",
 		"src/**.cpp",
@@ -7,10 +6,8 @@ project "procedural_geom"
 		"genie.lua"
 	}
 	defines { "BUILDING_PROCEDURAL_GEOM" }
-	links { "engine", "core", "renderer" }
+	dynamic_link_plugin { "engine", "core", "renderer" }
 	if build_studio then
-		links { "editor" }
+		dynamic_link_plugin { "editor" }
 	end
-	defaultConfigurations()
-
-linkPlugin("procedural_geom")
+end
