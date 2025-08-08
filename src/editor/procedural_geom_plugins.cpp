@@ -891,7 +891,7 @@ struct InstantiatePrefabNode : Node {
 		}
 		if (ImGui::Button("Instantiate")) {
 			WorldEditor& editor = m_resource.m_app.getWorldEditor();
-			const Array<EntityRef>& selected = editor.getSelectedEntities();
+			Span<const EntityRef> selected = editor.getSelectedEntities();
 			World* world = editor.getWorld();
 			while (EntityPtr child = world->getFirstChild(selected[0])) {
 				world->destroyEntity(*child);
@@ -1094,7 +1094,7 @@ struct SplineNode : Node {
 		if (!ctx.geometry) return error("Invalid context");
 
 		WorldEditor& editor = m_resource.m_app.getWorldEditor();
-		const Array<EntityRef>& selected = editor.getSelectedEntities();
+		Span<const EntityRef> selected = editor.getSelectedEntities();
 		if (selected.size() != 1) return error("Exactly one entity must be selected");
 
 		World& world = *editor.getWorld();
@@ -2703,7 +2703,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 	
 
 	bool canApply() {
-		return m_resource->m_material.length() != 0 && !m_app.getWorldEditor().getSelectedEntities().empty();
+		return m_resource->m_material.length() != 0 && !m_app.getWorldEditor().getSelectedEntities().size() == 0;
 	}
 
 	void apply();
@@ -2772,7 +2772,7 @@ Node::Node(EditorResource& resource)
 {}
 
 void ProceduralGeomGeneratorPlugin::apply() {
-	const Array<EntityRef>& selected = m_app.getWorldEditor().getSelectedEntities();
+	Span<const EntityRef> selected = m_app.getWorldEditor().getSelectedEntities();
 	if (selected.size() != 1) return;
 	
 	World* world = m_app.getWorldEditor().getWorld();
