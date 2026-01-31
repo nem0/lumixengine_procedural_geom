@@ -2693,7 +2693,7 @@ struct ProceduralGeomGeneratorPlugin : StudioApp::GUIPlugin, NodeEditor {
 			if (fs.gui("Open", &m_show_open, "pgm", false)) open(fs.getPath());
 			if (fs.gui("Save As", &m_show_save_as, "pgm", true)) saveAs(fs.getPath());
 
-			m_app.getAssetBrowser().resourceInput("material", m_resource->m_material, Material::TYPE);
+			m_app.getAssetBrowser().resourceInput("material", m_resource->m_material, Material::TYPE, -1);
 			m_resource->m_material.endUpdate();	
 
 			nodeEditorGUI(m_resource->m_nodes, m_resource->m_links);
