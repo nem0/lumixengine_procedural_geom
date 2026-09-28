@@ -4,6 +4,4 @@
 [![License](http://img.shields.io/:license-mit-blue.svg)](http://doge.mit-license.org)
 [![Twitter](https://img.shields.io/twitter/url/http/shields.io.svg?style=social)](https://twitter.com/mikulasflorek)
 
-[How to install this plugin](https://github.com/nem0/LumixEngine/wiki/available-plugins)
-
-Warning: Very early prototype! Missing featuers, no polish, might crash!
+[Deprecated, use procedural_geom.evox](https://github.com/nem0/LumixEngine/blob/master/data/scripts/core/procedural_geom.evox)
